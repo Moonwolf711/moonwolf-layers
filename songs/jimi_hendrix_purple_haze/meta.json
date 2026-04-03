@@ -1,14 +1,59 @@
 {
-  "title": "Purple Haze",
-  "artist": "Jimi Hendrix",
-  "bpm": 108,
-  "key": "E",
-  "bars": 30,
-  "difficulty": 4,
-  "instruments": [
-    "drums",
-    "guitar",
-    "bass"
-  ],
-  "structure": "intro(2)-verse(8)-chorus(4)-verse(8)-solo(4)-outro(4)"
+    "title": "Purple Haze",
+    "artist": "Jimi Hendrix",
+    "bpm": 108,
+    "key": "E",
+    "bars": 34,
+    "difficulty": 3,
+    "layers": [
+        {
+            "file": "01_lead_melody.mid",
+            "name": "Lead Melody",
+            "instrument": "Lead Melody",
+            "midi_ch": 1,
+            "suggested_device": "Drift - Lead"
+        },
+        {
+            "file": "03_chords.mid",
+            "name": "Chords",
+            "instrument": "Chords",
+            "midi_ch": 3,
+            "suggested_device": "Analog - Chords"
+        },
+        {
+            "file": "04_bass.mid",
+            "name": "Bass",
+            "instrument": "Bass",
+            "midi_ch": 4,
+            "suggested_device": "Analog - Bass"
+        },
+        {
+            "file": "09_kick.mid",
+            "name": "Kick",
+            "instrument": "Kick",
+            "midi_ch": 10,
+            "suggested_device": "Drum Rack"
+        },
+        {
+            "file": "10_snare.mid",
+            "name": "Snare",
+            "instrument": "Snare",
+            "midi_ch": 10,
+            "suggested_device": "Drum Rack"
+        },
+        {
+            "file": "11_hihats.mid",
+            "name": "Hi-Hats",
+            "instrument": "Hi-Hats",
+            "midi_ch": 10,
+            "suggested_device": "Drum Rack"
+        },
+        {
+            "file": "12_percussion.mid",
+            "name": "Percussion",
+            "instrument": "Percussion",
+            "midi_ch": 10,
+            "suggested_device": "Drum Rack"
+        }
+    ]
 }

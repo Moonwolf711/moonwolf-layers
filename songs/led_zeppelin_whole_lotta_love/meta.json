@@ -1,14 +1,52 @@
 {
-  "title": "Whole Lotta Love",
-  "artist": "Led Zeppelin",
-  "bpm": 90,
-  "key": "E",
-  "bars": 32,
-  "difficulty": 3,
-  "instruments": [
-    "drums",
-    "bass",
-    "guitar"
-  ],
-  "structure": "intro(4)-verse(8)-chorus(4)-bridge(4)-verse(8)-outro(4)"
+    "title": "Whole Lotta Love",
+    "artist": "Led Zeppelin",
+    "bpm": 90,
+    "key": "E",
+    "bars": 34,
+    "difficulty": 3,
+    "layers": [
+        {
+            "file": "01_lead_melody.mid",
+            "name": "Lead Melody",
+            "instrument": "Lead Melody",
+            "midi_ch": 1,
+            "suggested_device": "Drift - Lead"
+        },
+        {
+            "file": "04_bass.mid",
+            "name": "Bass",
+            "instrument": "Bass",
+            "midi_ch": 4,
+            "suggested_device": "Analog - Bass"
+        },
+        {
+            "file": "09_kick.mid",
+            "name": "Kick",
+            "instrument": "Kick",
+            "midi_ch": 10,
+            "suggested_device": "Drum Rack"
+        },
+        {
+            "file": "10_snare.mid",
+            "name": "Snare",
+            "instrument": "Snare",
+            "midi_ch": 10,
+            "suggested_device": "Drum Rack"
+        },
+        {
+            "file": "11_hihats.mid",
+            "name": "Hi-Hats",
+            "instrument": "Hi-Hats",
+            "midi_ch": 10,
+            "suggested_device": "Drum Rack"
+        },
+        {
+            "file": "12_percussion.mid",
+            "name": "Percussion",
+            "instrument": "Percussion",
+            "midi_ch": 10,
+            "suggested_device": "Drum Rack"
+        }
+    ]
 }

@@ -1,14 +1,59 @@
 {
-  "title": "Riders on the Storm",
-  "artist": "The Doors",
-  "bpm": 108,
-  "key": "Em",
-  "bars": 32,
-  "difficulty": 3,
-  "instruments": [
-    "drums",
-    "keys",
-    "bass"
-  ],
-  "structure": "intro(8)-verse(8)-chorus(4)-verse(8)-outro(4)"
+    "title": "Riders on the Storm",
+    "artist": "The Doors",
+    "bpm": 108,
+    "key": "Em",
+    "bars": 34,
+    "difficulty": 3,
+    "layers": [
+        {
+            "file": "01_lead_melody.mid",
+            "name": "Lead Melody",
+            "instrument": "Lead Melody",
+            "midi_ch": 1,
+            "suggested_device": "Drift - Lead"
+        },
+        {
+            "file": "04_bass.mid",
+            "name": "Bass",
+            "instrument": "Bass",
+            "midi_ch": 4,
+            "suggested_device": "Analog - Bass"
+        },
+        {
+            "file": "05_fx_sweep.mid",
+            "name": "FX Sweep",
+            "instrument": "FX Sweep",
+            "midi_ch": 5,
+            "suggested_device": "Wavetable - Sweep"
+        },
+        {
+            "file": "09_kick.mid",
+            "name": "Kick",
+            "instrument": "Kick",
+            "midi_ch": 10,
+            "suggested_device": "Drum Rack"
+        },
+        {
+            "file": "10_snare.mid",
+            "name": "Snare",
+            "instrument": "Snare",
+            "midi_ch": 10,
+            "suggested_device": "Drum Rack"
+        },
+        {
+            "file": "11_hihats.mid",
+            "name": "Hi-Hats",
+            "instrument": "Hi-Hats",
+            "midi_ch": 10,
+            "suggested_device": "Drum Rack"
+        },
+        {
+            "file": "12_percussion.mid",
+            "name": "Percussion",
+            "instrument": "Percussion",
+            "midi_ch": 10,
+            "suggested_device": "Drum Rack"
+        }
+    ]
 }
