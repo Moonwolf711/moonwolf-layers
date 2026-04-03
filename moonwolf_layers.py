@@ -1668,9 +1668,9 @@ class MoonwolfLayers:
         self.pending_offs.append((note, DRUM_CH, time.time() + 0.15))
 
         # Record into looper
-        if self.level and hasattr(self.level, 'loop_duration'):
-            t = self.camera_x / max(1, self.level.scroll_speed)  # Convert camera pos to time
-            loop_dur = self.level.loop_duration / max(1, self.level.scroll_speed)
+        if self.level:
+            t = self.camera_x / max(1, self.level.scroll_speed)
+            loop_dur = self.level.level_width / max(1, self.level.scroll_speed)
             t_in_loop = t % loop_dur if loop_dur > 0 else t
             if self.current_level not in self.recorded_layers:
                 self.recorded_layers[self.current_level] = []
@@ -2189,7 +2189,7 @@ class MoonwolfLayers:
                     self.note_on(note, 100, mel_ch)
                     # Record into looper
                     t = self.camera_x / max(1, self.level.scroll_speed)
-                    loop_dur = self.level.loop_duration / max(1, self.level.scroll_speed)
+                    loop_dur = self.level.level_width / max(1, self.level.scroll_speed)
                     t_in_loop = t % loop_dur if loop_dur > 0 else t
                     if self.current_level not in self.recorded_layers:
                         self.recorded_layers[self.current_level] = []
