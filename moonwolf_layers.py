@@ -861,6 +861,8 @@ class MoonwolfLayers:
         self.star_power_timer = 0
         self.star_meter = 0.0
         self.locked_levels = 0
+        self.recorded_layers = {}  # {level_idx: [(time_sec, note, vel, ch, dur), ...]}
+        self.loop_playback_head = 0.0  # Tracks time for looping completed layers
         self.pending_offs = []
         self.perfect_bonus = 1.0
         self.speed_bonus = 1.0
@@ -973,6 +975,8 @@ class MoonwolfLayers:
         self.combo = 0
         self.max_combo = 0
         self.locked_levels = 0
+        self.recorded_layers = {}  # {level_idx: [(time_sec, note, vel, ch, dur), ...]}
+        self.loop_playback_head = 0.0  # Tracks time for looping completed layers
         self.star_meter = 0.0
 
         # Reset XP stat counters
@@ -1547,6 +1551,15 @@ class MoonwolfLayers:
         self.note_on(note, 100, DRUM_CH)
         self.pending_offs.append((note, DRUM_CH, time.time() + 0.15))
 
+        # Record into looper
+        if self.level and hasattr(self.level, 'loop_duration'):
+            t = self.camera_x / max(1, self.level.scroll_speed)  # Convert camera pos to time
+            loop_dur = self.level.loop_duration / max(1, self.level.scroll_speed)
+            t_in_loop = t % loop_dur if loop_dur > 0 else t
+            if self.current_level not in self.recorded_layers:
+                self.recorded_layers[self.current_level] = []
+            self.recorded_layers[self.current_level].append((t_in_loop, note, 100, DRUM_CH, 0.15))
+
         # Check star power activation
         if self.combo >= STAR_POWER_THRESHOLD and not self.star_power:
             self.star_power = True
@@ -1717,6 +1730,7 @@ class MoonwolfLayers:
 
         self.combo_shield_used = False  # Reset shield each level
         self.p1_y = HEIGHT // 2        # Reset ship position
+        self.loop_playback_head = 0.0  # Sync looper with level start
         self.p1_vy = 0.0               # Reset ship velocity
 
         # Tell Ableton to start recording
@@ -1731,8 +1745,11 @@ class MoonwolfLayers:
         self._send_transport(TRANSPORT_CC_RECORD)  # Toggle record off
         self.ableton_recording = False
         self.locked_levels += 1
-        print(f"  Level {self.current_level + 1} locked in Ableton! ({self.level.name})")
-        print(f"  Set clip to LOOP in Ableton, then arm next track for the next level.")
+        recorded_count = len(self.recorded_layers.get(self.current_level, []))
+        print(f"  Level {self.current_level + 1} locked! ({self.level.name}) — {recorded_count} notes looping")
+        looping_layers = [self.levels[i].name for i in self.recorded_layers if i < self.current_level + 1]
+        if looping_layers:
+            print(f"  Live looping: {', '.join(looping_layers)}")
 
         # Move to next level
         self.current_level += 1
@@ -1804,6 +1821,36 @@ class MoonwolfLayers:
             else:
                 still.append((note, ch, off_time))
         self.pending_offs = still
+
+        # === LIVE LOOPER: play back completed layers as MIDI ===
+        if self.state in ("PLAYING", "STAR_POWER") and self.level:
+            old_loop_head = self.loop_playback_head
+            self.loop_playback_head += dt
+            # Get loop duration in seconds for the current level
+            if self.level.scroll_speed > 0:
+                current_loop_dur = self.level.level_width / self.level.scroll_speed
+            else:
+                current_loop_dur = (60.0 / self.bpm) * 4 * 8  # fallback 8 bars
+
+            # Wrap the playback head
+            if current_loop_dur > 0 and self.loop_playback_head >= current_loop_dur:
+                self.loop_playback_head -= current_loop_dur
+
+            # Play back all locked layers
+            for lvl_idx, recorded in self.recorded_layers.items():
+                if lvl_idx >= self.current_level:
+                    continue  # Only play back COMPLETED levels
+                for t, note, vel, ch, dur in recorded:
+                    # Check if this note should play right now
+                    if current_loop_dur > 0:
+                        t_wrapped = t % current_loop_dur
+                        if old_loop_head <= t_wrapped < self.loop_playback_head:
+                            self.note_on(note, vel, ch)
+                            self.pending_offs.append((note, ch, now + dur))
+                        # Handle wrap-around
+                        elif old_loop_head > self.loop_playback_head and (t_wrapped >= old_loop_head or t_wrapped < self.loop_playback_head):
+                            self.note_on(note, vel, ch)
+                            self.pending_offs.append((note, ch, now + dur))
 
         # Update particles & popups always
         self.particles.update(dt)
@@ -2018,7 +2065,15 @@ class MoonwolfLayers:
                     collect_radius = base_radius
                 if dy < collect_radius:
                     # Ship is close — full velocity, score it
-                    self.note_on(note, 100, getattr(self.level, 'midi_channel', self.p1_midi_ch))
+                    mel_ch = getattr(self.level, 'midi_channel', self.p1_midi_ch)
+                    self.note_on(note, 100, mel_ch)
+                    # Record into looper
+                    t = self.camera_x / max(1, self.level.scroll_speed)
+                    loop_dur = self.level.loop_duration / max(1, self.level.scroll_speed)
+                    t_in_loop = t % loop_dur if loop_dur > 0 else t
+                    if self.current_level not in self.recorded_layers:
+                        self.recorded_layers[self.current_level] = []
+                    self.recorded_layers[self.current_level].append((t_in_loop, note, 100, mel_ch, 0.25))
                     self.hits += 1
                     self.combo += 1
                     self.combo_pulse = 1.0
