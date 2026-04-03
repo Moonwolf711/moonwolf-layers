@@ -68,21 +68,29 @@ GRADES = [
     (0,  "F", C_ENEMY),
 ]
 
-# Drum notes (GM)
-KICK = 36; SNARE = 38; HAT = 42; OHAT = 46; CRASH = 49; RIDE = 51; LTOM = 45; HTOM = 48
+# Drum notes — mapped to Lycra Kit on track 2
+# Pad layout from the kit:
+#   36=Kick Lycra  37=Clap Wood  38=Snare Lycra  39=Clap Lycra
+#   40=Snare Rev   41=Tom Mid 1  42=HH Closed    43=Tom Mid 2
+#   44=Shaker      45=Tom 909 Hi 46=HH Open      47=Tom 909 Mid
+KICK = 36; SNARE = 38; HAT = 42; OHAT = 46
+CRASH = 39    # Clap Lycra (percussive crash-like hit)
+RIDE = 44     # Shaker Noise 3 (rhythmic texture)
+LTOM = 41     # Tom Mid Analog 1
+HTOM = 47     # Tom 909 Mid 3
 DRUM_CH = 9
 
 # Fighting Edge button -> drum lane mapping
-# Sq=Kick X=Snare O=HiHat Tri=OpenHH L1=Crash R1=Ride L2=LowTom R2=HighTom
+# Sq=Kick X=Snare O=HiHat Tri=OpenHH L1=Clap R1=Shaker L2=TomLo R2=TomHi
 FE_DRUM_MAP = {
-    0: (KICK,  "KICK",  (255, 80, 50)),
-    1: (SNARE, "SNARE", (255, 220, 50)),
-    2: (HAT,   "HH",    (50, 255, 150)),
-    3: (OHAT,  "OH",    (50, 200, 255)),
-    4: (CRASH, "CRASH", (255, 100, 255)),
-    5: (RIDE,  "RIDE",  (150, 150, 255)),
-    6: (LTOM,  "LTOM",  (255, 150, 50)),
-    7: (HTOM,  "HTOM",  (200, 80, 200)),
+    0: (KICK,  "KICK",   (255, 80, 50)),
+    1: (SNARE, "SNARE",  (255, 220, 50)),
+    2: (HAT,   "HH",     (50, 255, 150)),
+    3: (OHAT,  "OH",     (50, 200, 255)),
+    4: (CRASH, "CLAP",   (255, 100, 255)),
+    5: (RIDE,  "SHAKER", (150, 150, 255)),
+    6: (LTOM,  "TOM LO", (255, 150, 50)),
+    7: (HTOM,  "TOM HI", (200, 80, 200)),
 }
 
 # Music
@@ -565,99 +573,88 @@ TRANSPORT_CC_RECORD = 117
 import socket
 
 BRIDGE_HOST = "127.0.0.1"
-BRIDGE_PORT = 8002  # Moonwolf Bridge M4L device
-COLAB_PORT = 8001   # CoLaB fallback
+ABLETON_OSC_PORT = 11000  # AbletonOSC Remote Script (confirmed working)
+COLAB_PORT = 8001         # CoLaB fallback
 
 class AbletonOSC:
-    """Control Ableton via Moonwolf Bridge M4L device (UDP port 8002).
-    Falls back to CoLaB on port 8001 if needed.
-    Send plain text /moonwolf/... commands — Bridge executes them via LiveAPI."""
-    def __init__(self, host=BRIDGE_HOST, port=BRIDGE_PORT):
+    """Control Ableton via AbletonOSC (port 11000) for transport/BPM.
+    Uses pythonosc-style raw OSC for reliable communication."""
+    def __init__(self, host=BRIDGE_HOST, port=ABLETON_OSC_PORT):
         self.host = host
         self.port = port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.connected = True
-        print(f"  Ableton LiveAPI: Moonwolf Bridge UDP {host}:{port}")
+        print(f"  Ableton control: AbletonOSC UDP {host}:{port}")
 
-    def send(self, command):
-        """Send a plain text command to Moonwolf Bridge."""
+    def _osc_msg(self, address, *args):
+        """Build a raw OSC message."""
+        import struct
+        addr = address.encode('utf-8') + b'\x00'
+        while len(addr) % 4: addr += b'\x00'
+        tags = ','
+        data = b''
+        for a in args:
+            if isinstance(a, int):
+                tags += 'i'; data += struct.pack('>i', a)
+            elif isinstance(a, float):
+                tags += 'f'; data += struct.pack('>f', a)
+        tags_b = tags.encode('utf-8') + b'\x00'
+        while len(tags_b) % 4: tags_b += b'\x00'
+        return addr + tags_b + data
+
+    def send_osc(self, address, *args):
+        """Send OSC message to AbletonOSC."""
         try:
-            self.sock.sendto(command.encode('utf-8'), (self.host, self.port))
+            msg = self._osc_msg(address, *args)
+            self.sock.sendto(msg, (self.host, self.port))
         except Exception as e:
-            print(f"  Bridge send error: {e}")
+            print(f"  OSC send error: {e}")
 
     # === Transport ===
     def set_tempo(self, bpm):
-        self.send(f"/moonwolf/transport/tempo {bpm}")
+        self.send_osc('/live/song/set/tempo', float(bpm))
 
     def play(self):
-        self.send("/moonwolf/transport/play")
+        self.send_osc('/live/song/start_playing')
 
     def stop(self):
-        self.send("/moonwolf/transport/stop")
+        self.send_osc('/live/song/stop_playing')
 
     def record(self):
-        self.send("/moonwolf/transport/record")
+        self.send_osc('/live/song/set/record_mode', 1)
 
     def stop_record(self):
-        self.send("/moonwolf/transport/stop_record")
+        self.send_osc('/live/song/set/record_mode', 0)
 
     def set_metronome(self, on=True):
-        self.send(f"/moonwolf/transport/metronome {1 if on else 0}")
+        self.send_osc('/live/song/set/metronome', 1 if on else 0)
 
-    # === Track management ===
-    def create_track(self, name, midi_channel=0):
-        self.send(f"/moonwolf/track/create {name} {midi_channel}")
-
+    # === Track management (via AbletonOSC) ===
     def arm_track(self, track, armed=True):
-        self.send(f"/moonwolf/track/arm {track} {1 if armed else 0}")
-
-    def arm_exclusive(self, track):
-        """Arm one track, disarm all others."""
-        self.send(f"/moonwolf/arm_all {track}")
-
-    def name_track(self, track, name):
-        self.send(f"/moonwolf/track/name {track} {name}")
+        self.send_osc('/live/track/set/arm', int(track), 1 if armed else 0)
 
     def mute_track(self, track, muted=True):
-        self.send(f"/moonwolf/track/mute {track} {1 if muted else 0}")
+        self.send_osc('/live/track/set/mute', int(track), 1 if muted else 0)
 
     def set_volume(self, track, vol):
-        self.send(f"/moonwolf/track/volume {track} {vol}")
-
-    def delete_track(self, track):
-        self.send(f"/moonwolf/track/delete {track}")
+        self.send_osc('/live/track/set/volume', int(track), float(vol))
 
     # === Clip control ===
     def fire_clip(self, track, clip):
-        self.send(f"/moonwolf/clip/fire {track} {clip}")
+        self.send_osc('/live/clip/fire', int(track), int(clip))
 
     def stop_clips(self, track):
-        self.send(f"/moonwolf/clip/stop {track}")
+        self.send_osc('/live/clip/stop', int(track), 0)
 
-    def quantize_clip(self, track, clip, grid=5):
-        self.send(f"/moonwolf/clip/quantize {track} {clip} {grid}")
-
-    def loop_clip(self, track, clip, looping=True):
-        self.send(f"/moonwolf/clip/loop {track} {clip} {1 if looping else 0}")
-
-    # === Full session setup ===
-    def setup_session(self, bpm, layers):
-        """Create a full session for a song.
-        layers: list of (name, midi_channel) tuples."""
-        layer_str = ",".join(f"{name}:{ch}" for name, ch in layers)
-        self.send(f"/moonwolf/setup/session {bpm} {layer_str}")
-
-    # === Query ===
-    def query_tracks(self):
-        self.send("/moonwolf/query/tracks")
-
-    def query_tempo(self):
-        self.send("/moonwolf/query/tempo")
+    # === Session setup ===
+    def setup_session(self, bpm, layers=None):
+        """Set BPM and stop transport."""
+        self.set_tempo(bpm)
+        self.stop()
 
     # === Logging ===
     def log(self, msg):
-        """Send to CoLaB console (fallback port)."""
+        """Send to CoLaB console."""
         try:
             self.sock.sendto(f"[INFO] {msg}".encode('utf-8'), (self.host, COLAB_PORT))
         except Exception:
@@ -2164,8 +2161,8 @@ class MoonwolfLayers:
                 continue
             px, py, note, _ = pickup
 
-            # Note reaches the hit line — ALWAYS play it for correct music
-            if player_x >= px - 5:
+            # Note reaches the hit line — fire slightly early to compensate for audio latency
+            if player_x >= px - 20:
                 pickup[3] = True
                 dy = abs(self.p1_y - py)
 
@@ -2237,8 +2234,8 @@ class MoonwolfLayers:
             if dl[3]:  # Already hit by player
                 continue
             dx, lane_idx, drum_note, _ = dl
-            # Target has passed the hit line
-            if player_x >= dx + HIT_MISS:
+            # Target reaches the hit line — fire early to compensate for audio latency
+            if player_x >= dx - 10:
                 dl[3] = True  # Mark as passed
                 # Play it quietly so the backing track stays intact
                 self.note_on(drum_note, 40, DRUM_CH)
