@@ -26,6 +26,7 @@ import mido
 # Add project dir to path for song_library import
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from song_library import get_song_list, load_song
+import save_system
 
 # ======================== CONFIG ========================
 WIDTH, HEIGHT = 1280, 720
@@ -800,8 +801,26 @@ class MoonwolfLayers:
         self.fe_buttons = [False] * 8
         self.fe_hat = -1
 
-        # Game state — start at MAIN_MENU
-        self.state = "MAIN_MENU"
+        # ===== PROFILE STATE =====
+        self.profile = None
+        self.profile_list = save_system.list_profiles()
+        self.profile_cursor = 0  # 0..len(profiles) where last = "NEW PROFILE"
+        self.profile_naming = False  # True when typing a new name
+        self.profile_name_buf = ""
+        self.profile_animal_idx = 0  # Index into CHARACTERS for new profile
+        self.profile_animal_step = False  # True when choosing animal for new profile
+        self.profile_palette_name = "default"  # Active palette override
+
+        # XP tracking per level
+        self.perfects = 0
+        self.greats = 0
+        self.goods = 0
+        self.combo_10s = 0
+        self.star_power_activations = 0
+        self.xp_result = None  # Filled after level complete
+
+        # Game state — start at PROFILE_SELECT
+        self.state = "PROFILE_SELECT"
         self.state_timer = 0
         self.beat_timer = 0
         self.beat_flash = 0
@@ -926,6 +945,14 @@ class MoonwolfLayers:
         self.locked_levels = 0
         self.star_meter = 0.0
 
+        # Reset XP stat counters
+        self.perfects = 0
+        self.greats = 0
+        self.goods = 0
+        self.combo_10s = 0
+        self.star_power_activations = 0
+        self.xp_result = None
+
         # Apply character abilities
         p1_ch = self.CHARACTERS[self.p1_char_idx]
         p2_ch = self.CHARACTERS[self.p2_char_idx]
@@ -952,8 +979,8 @@ class MoonwolfLayers:
             print(f"    {i+1}. {lv.name} ({lv.bars} bars, {lv.instrument_name}){tag}")
 
     # ===== MENU ITEMS =====
-    MENU_ITEMS_2P = ["PLAYERS", "SONG", "P1 CHARACTER", "P1 ROLE", "P2 CHARACTER", "P2 ROLE", "MIDI OUTPUT", "START GAME"]
-    MENU_ITEMS_1P = ["PLAYERS", "SONG", "P1 CHARACTER", "P1 ROLE", "MIDI OUTPUT", "START GAME"]
+    MENU_ITEMS_2P = ["PLAYERS", "SONG", "P1 CHARACTER", "P1 PALETTE", "P1 ROLE", "P2 CHARACTER", "P2 ROLE", "MIDI OUTPUT", "START GAME"]
+    MENU_ITEMS_1P = ["PLAYERS", "SONG", "P1 CHARACTER", "P1 PALETTE", "P1 ROLE", "MIDI OUTPUT", "START GAME"]
 
     @property
     def _menu_items(self):
@@ -1008,7 +1035,25 @@ class MoonwolfLayers:
         elif item == "P1 CHARACTER":
             self.p1_char_idx = (self.p1_char_idx + direction) % len(self.CHARACTERS)
             ch = self.CHARACTERS[self.p1_char_idx]
-            self.p1_sprite = make_sprite(ch["sprite"], ch["palette"], 3)
+            pal = save_system.apply_palette_override(ch["palette"], self.profile_palette_name)
+            self.p1_sprite = make_sprite(ch["sprite"], pal, 3)
+        elif item == "P1 PALETTE":
+            # Cycle through unlocked palettes
+            level = self.profile["level"] if self.profile else 1
+            available = save_system.unlocked_palettes(level)
+            if available:
+                try:
+                    idx = available.index(self.profile_palette_name)
+                except ValueError:
+                    idx = 0
+                idx = (idx + direction) % len(available)
+                self.profile_palette_name = available[idx]
+                if self.profile:
+                    self.profile["color_palette"] = self.profile_palette_name
+                # Rebuild P1 sprite with new palette
+                ch = self.CHARACTERS[self.p1_char_idx]
+                pal = save_system.apply_palette_override(ch["palette"], self.profile_palette_name)
+                self.p1_sprite = make_sprite(ch["sprite"], pal, 3)
         elif item == "P2 CHARACTER":
             self.p2_char_idx = (self.p2_char_idx + direction) % len(self.CHARACTERS)
             ch = self.CHARACTERS[self.p2_char_idx]
@@ -1057,6 +1102,20 @@ class MoonwolfLayers:
         # Subtitle
         sub = self.font_menu.render("Layer loops. Build songs. Star Power riffs.", True, C_HUD_DIM)
         self.screen.blit(sub, (cx - sub.get_width()//2, 100))
+
+        # Profile info bar
+        if self.profile:
+            level, xp_into, xp_needed = save_system.xp_progress(self.profile["xp"])
+            prof_str = f"{self.profile['name']}  Lv.{level}  XP: {self.profile['xp']}"
+            prof_surf = self.font.render(prof_str, True, C_NEON_CYAN)
+            self.screen.blit(prof_surf, (cx - prof_surf.get_width()//2, 116))
+            # Small XP progress bar
+            bar_w, bar_h = 200, 6
+            bar_x = cx - bar_w // 2
+            bar_y = 132
+            pygame.draw.rect(self.screen, (30, 25, 50), (bar_x, bar_y, bar_w, bar_h))
+            fill = int(bar_w * xp_into / max(1, xp_needed))
+            pygame.draw.rect(self.screen, C_NEON_CYAN, (bar_x, bar_y, fill, bar_h))
 
         # Character preview sprites (larger)
         p1_ch = self.CHARACTERS[self.p1_char_idx]
@@ -1139,6 +1198,18 @@ class MoonwolfLayers:
                 self.screen.blit(val_surf, (val_x, y + 2))
                 ability = self.font.render(ch['ability'], True, (120, 120, 140))
                 self.screen.blit(ability, (val_x, y + 26))
+
+            elif item_name == "P1 PALETTE":
+                pal_info = save_system.COLOR_PALETTES.get(self.profile_palette_name, {})
+                pal_label = pal_info.get("label", self.profile_palette_name)
+                pal_color = C_STAR_GOLD if self.profile_palette_name != "default" else C_HUD
+                val_surf = self.font_big.render(f"< {pal_label} >", True, pal_color if selected else C_HUD_DIM)
+                self.screen.blit(val_surf, (val_x, y + 2))
+                level = self.profile["level"] if self.profile else 1
+                n_unlocked = len(save_system.unlocked_palettes(level))
+                n_total = len(save_system.COLOR_PALETTES)
+                detail = self.font.render(f"{n_unlocked}/{n_total} unlocked", True, (120, 120, 140))
+                self.screen.blit(detail, (val_x, y + 26))
 
             elif item_name == "P1 ROLE":
                 role = INSTRUMENT_ROLES[self.p1_role_idx]
@@ -1326,6 +1397,9 @@ class MoonwolfLayers:
                 self.combo += 1
                 self.combo_pulse = 1.0
                 self.hits += 1
+                self.perfects += 1
+                if self.combo % 10 == 0 and self.combo > 0:
+                    self.combo_10s += 1
                 mult = self._get_multiplier()
                 self.score += 50 * mult * (2 if self.predator else 1)
                 self.star_meter = min(1.0, self.star_meter + 0.08 * self.star_fill_bonus)
@@ -1339,6 +1413,9 @@ class MoonwolfLayers:
                 self.combo += 1
                 self.combo_pulse = 1.0
                 self.hits += 1
+                self.greats += 1
+                if self.combo % 10 == 0 and self.combo > 0:
+                    self.combo_10s += 1
                 mult = self._get_multiplier()
                 self.score += 30 * mult
                 self.star_meter = min(1.0, self.star_meter + 0.05 * self.star_fill_bonus)
@@ -1352,6 +1429,9 @@ class MoonwolfLayers:
                 self.combo += 1
                 self.combo_pulse = 1.0
                 self.hits += 1
+                self.goods += 1
+                if self.combo % 10 == 0 and self.combo > 0:
+                    self.combo_10s += 1
                 mult = self._get_multiplier()
                 self.score += 10 * mult
                 self.star_meter = min(1.0, self.star_meter + 0.03 * self.star_fill_bonus)
@@ -1380,6 +1460,7 @@ class MoonwolfLayers:
         if self.combo >= STAR_POWER_THRESHOLD and not self.star_power:
             self.star_power = True
             self.star_power_timer = (60.0 / self.bpm) * 4 * STAR_POWER_BARS
+            self.star_power_activations += 1
             self._shake(10)
             self.particles.emit(200, HEIGHT // 2, 30, C_STAR_GOLD, 300, 1.0, 5)
             self.popups.add(WIDTH // 2, HEIGHT // 2 - 60, "STAR POWER!", C_STAR_GOLD)
@@ -1400,14 +1481,26 @@ class MoonwolfLayers:
                     running = False
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
-                        if self.state == "MAIN_MENU":
+                        if self.state == "PROFILE_SELECT":
+                            if self.profile_naming or self.profile_animal_step:
+                                self.profile_naming = False
+                                self.profile_animal_step = False
+                                self.profile_name_buf = ""
+                            else:
+                                running = False
+                        elif self.state == "MAIN_MENU":
                             running = False
                         else:
-                            # Return to menu
+                            # Return to menu, save profile
+                            if self.profile:
+                                save_system.save_profile(self.profile)
                             self.state = "MAIN_MENU"
                             self.state_timer = 0
                             self.detected_controllers = self._scan_controllers()
                             self.available_midi = self._scan_midi_ports()
+
+                    elif self.state == "PROFILE_SELECT":
+                        self._handle_profile_input(event)
 
                     elif self.state == "MAIN_MENU" and menu_debounce <= 0:
                         menu_debounce = 0.15
@@ -1462,7 +1555,7 @@ class MoonwolfLayers:
                     menu_debounce = 0.3
 
             # Joystick buttons during gameplay
-            if self.joystick and self.state not in ("MAIN_MENU",):
+            if self.joystick and self.state not in ("MAIN_MENU", "PROFILE_SELECT"):
                 for i in range(min(self.joystick.get_numbuttons(), 16)):
                     if self.joystick.get_button(i):
                         if i == 0 and self.state == "LEVEL_INTRO":
@@ -1487,6 +1580,14 @@ class MoonwolfLayers:
         self.hits = 0
         self.total_targets = len(self.level.pickups) + len(self.level.drum_lanes)
         self.level.reset()
+
+        # Reset per-level XP stat counters
+        self.perfects = 0
+        self.greats = 0
+        self.goods = 0
+        self.combo_10s = 0
+        self.star_power_activations = 0
+        self.xp_result = None
 
         self.combo_shield_used = False  # Reset shield each level
         self.p1_y = HEIGHT // 2        # Reset ship position
@@ -1616,9 +1717,38 @@ class MoonwolfLayers:
                 self._send_transport(TRANSPORT_CC_RECORD)  # Toggle record off
                 self.ableton_recording = False
             print(f"  Level complete! Hits: {self.hits}/{self.total_targets} | Max combo: {self.max_combo}")
-            # Big particle burst in the grade's color
+
+            # Award XP via save system
             pct = (self.hits / max(1, self.total_targets)) * 100
-            _, grade_color = self._get_grade(pct)
+            grade_letter, grade_color = self._get_grade(pct)
+            if self.profile:
+                self.xp_result = save_system.award_xp(
+                    self.profile,
+                    hits=self.hits,
+                    perfects=self.perfects,
+                    greats=self.greats,
+                    goods=self.goods,
+                    combo_10s=self.combo_10s,
+                    star_powers=self.star_power_activations,
+                    levels_complete=1,
+                    grade=grade_letter,
+                )
+                self.profile["games_played"] = self.profile.get("games_played", 0) + 1
+                self.profile["total_hits"] = self.profile.get("total_hits", 0) + self.hits
+                self.profile["total_perfects"] = self.profile.get("total_perfects", 0) + self.perfects
+                self.profile["total_score"] = self.profile.get("total_score", 0) + self.score
+                self.profile["best_combo"] = max(self.profile.get("best_combo", 0), self.max_combo)
+                # Track best grade
+                grade_order = ["F", "D", "C", "B", "A", "S"]
+                old_g = self.profile.get("best_grade", "F")
+                if grade_order.index(grade_letter) > grade_order.index(old_g):
+                    self.profile["best_grade"] = grade_letter
+                save_system.save_profile(self.profile)
+                print(f"  XP earned: {self.xp_result['xp_earned']} | Level: {self.xp_result['new_level']}")
+                if self.xp_result['leveled_up']:
+                    print(f"  LEVEL UP! {self.xp_result['old_level']} -> {self.xp_result['new_level']}")
+
+            # Big particle burst in the grade's color
             for _ in range(3):  # Multiple burst points across screen
                 bx = random.randint(WIDTH // 4, WIDTH * 3 // 4)
                 self.particles.emit(bx, HEIGHT // 3, 40, grade_color, speed=250, life=1.5, size=4, spread=5.0)
@@ -1697,20 +1827,25 @@ class MoonwolfLayers:
                     self.combo += 1
                     self.combo_pulse = 1.0
                     self.max_combo = max(self.max_combo, self.combo)
+                    if self.combo % 10 == 0 and self.combo > 0:
+                        self.combo_10s += 1
                     mult = self._get_multiplier()
 
                     if dy < 15 * self.perfect_bonus:
+                        self.perfects += 1
                         self.score += 50 * mult * (2 if self.predator else 1)
                         self.star_meter = min(1.0, self.star_meter + 0.08 * self.star_fill_bonus)
                         self.popups.add(200, int(self.p1_y) - 30, f"PERFECT! x{mult}", C_STAR_GOLD)
                         self.particles.emit(200, int(py), 12, C_STAR_GOLD, 180)
                         self._shake(4)
                     elif dy < 30:
+                        self.greats += 1
                         self.score += 30 * mult
                         self.star_meter = min(1.0, self.star_meter + 0.05 * self.star_fill_bonus)
                         self.popups.add(200, int(self.p1_y) - 30, f"GREAT! x{mult}", C_NEON_GREEN)
                         self.particles.emit(200, int(py), 8, C_NEON_GREEN, 120)
                     else:
+                        self.goods += 1
                         self.score += 10 * mult
                         self.star_meter = min(1.0, self.star_meter + 0.03 * self.star_fill_bonus)
                         self.popups.add(200, int(self.p1_y) - 30, f"Good x{mult}", C_HUD)
@@ -1759,6 +1894,9 @@ class MoonwolfLayers:
     def _draw(self):
         self.screen.fill(C_BG)
 
+        if self.state == "PROFILE_SELECT":
+            self._draw_profile_select()
+            return
         if self.state == "MAIN_MENU":
             self._draw_menu()
             return
@@ -2143,9 +2281,18 @@ class MoonwolfLayers:
             (f"Max Combo: {self.max_combo}x", C_NEON_PINK),
             (f"Hits: {self.hits}/{self.total_targets}", C_HUD_DIM),
         ]
+
+        # XP results
+        if self.xp_result:
+            stats.append((f"+{self.xp_result['xp_earned']} XP", C_STAR_GOLD))
+            if self.xp_result['leveled_up']:
+                stats.append((f"LEVEL UP! Lv.{self.xp_result['new_level']}", C_NEON_GREEN))
+                for unlock in self.xp_result.get('new_unlocks', []):
+                    stats.append((f"Unlocked: {unlock}", C_NEON_YELLOW))
+
         for i, (s, color) in enumerate(stats):
             surf = self.font_big.render(s, True, color)
-            self.screen.blit(surf, (cx - 160, cy - 60 + i * 32))
+            self.screen.blit(surf, (cx - 160, cy - 60 + i * 28))
 
         loop_msg = f"Clip recorded! Set to LOOP in Ableton. Arm next track. Press TRIGGER / SPACE"
         pulse = 0.5 + 0.5 * math.sin(time.time() * 4)
@@ -2164,6 +2311,18 @@ class MoonwolfLayers:
         for text, color, x, y, font in texts:
             self.screen.blit(font.render(text, True, color), (x, y))
 
+        # XP bar (top right)
+        if self.profile:
+            level, xp_into, xp_needed = save_system.xp_progress(self.profile["xp"])
+            xp_bar_w, xp_bar_h = 120, 8
+            xp_x = WIDTH - xp_bar_w - 10
+            xp_y = 10
+            lv_surf = self.font.render(f"Lv.{level}", True, C_NEON_CYAN)
+            self.screen.blit(lv_surf, (xp_x - lv_surf.get_width() - 5, xp_y - 2))
+            pygame.draw.rect(self.screen, (30, 25, 50), (xp_x, xp_y, xp_bar_w, xp_bar_h))
+            fill = int(xp_bar_w * xp_into / max(1, xp_needed))
+            pygame.draw.rect(self.screen, C_NEON_CYAN, (xp_x, xp_y, fill, xp_bar_h))
+
     def _hsv(self, h, s, v):
         c = v * s
         x = c * (1 - abs((h / 60) % 2 - 1))
@@ -2175,6 +2334,156 @@ class MoonwolfLayers:
         elif h < 300: r, g, b = x, 0, c
         else:         r, g, b = c, 0, x
         return (int((r+m)*255), int((g+m)*255), int((b+m)*255))
+
+    # ===== PROFILE SELECT SCREEN =====
+    def _handle_profile_input(self, event):
+        """Handle keyboard input on the profile select screen."""
+        if self.profile_naming:
+            # Typing a name for new profile
+            if event.key == pygame.K_RETURN and len(self.profile_name_buf.strip()) > 0:
+                # Move to animal selection step
+                self.profile_naming = False
+                self.profile_animal_step = True
+                self.profile_animal_idx = 0
+            elif event.key == pygame.K_BACKSPACE:
+                self.profile_name_buf = self.profile_name_buf[:-1]
+            else:
+                ch = event.unicode
+                if ch and ch.isprintable() and len(self.profile_name_buf) < 16:
+                    self.profile_name_buf += ch
+            return
+
+        if self.profile_animal_step:
+            # Choosing animal base for new profile
+            if event.key in (pygame.K_LEFT,):
+                self.profile_animal_idx = (self.profile_animal_idx - 1) % len(self.CHARACTERS)
+            elif event.key in (pygame.K_RIGHT,):
+                self.profile_animal_idx = (self.profile_animal_idx + 1) % len(self.CHARACTERS)
+            elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                animal = self.CHARACTERS[self.profile_animal_idx]["animal"]
+                name = self.profile_name_buf.strip()
+                self.profile = save_system.new_profile(name, animal)
+                save_system.save_profile(self.profile)
+                self.profile_palette_name = "default"
+                self.profile_animal_step = False
+                self.profile_name_buf = ""
+                self.profile_list = save_system.list_profiles()
+                self.state = "MAIN_MENU"
+                self.menu_selection = 0
+            return
+
+        # Normal profile list navigation
+        total = len(self.profile_list) + 1  # +1 for NEW PROFILE
+        if event.key == pygame.K_UP:
+            self.profile_cursor = (self.profile_cursor - 1) % total
+        elif event.key == pygame.K_DOWN:
+            self.profile_cursor = (self.profile_cursor + 1) % total
+        elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+            if self.profile_cursor < len(self.profile_list):
+                # Select existing profile
+                self.profile = self.profile_list[self.profile_cursor]
+                self.profile_palette_name = self.profile.get("color_palette", "default")
+                self.state = "MAIN_MENU"
+                self.menu_selection = 0
+            else:
+                # New profile — start naming
+                self.profile_naming = True
+                self.profile_name_buf = ""
+
+    def _draw_profile_select(self):
+        """Draw the profile selection / creation screen."""
+        self.screen.fill(C_BG)
+
+        # Animated skyline
+        draw_skyline(self.screen, self.skyline, int(time.time() * 15), HEIGHT - 170)
+        pygame.draw.line(self.screen, C_GROUND_TOP, (0, HEIGHT - 170), (WIDTH, HEIGHT - 170), 2)
+
+        # Overlay
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((8, 8, 24, 120))
+        self.screen.blit(overlay, (0, 0))
+
+        cx = WIDTH // 2
+
+        # Title
+        pulse = 0.7 + 0.3 * math.sin(time.time() * 2)
+        title = self.font_huge.render("MOONWOLF LAYERS", True,
+                                       (int(C_NEON_CYAN[0]*pulse), int(C_NEON_CYAN[1]*pulse), int(C_NEON_CYAN[2]*pulse)))
+        self.screen.blit(title, (cx - title.get_width()//2, 30))
+
+        sub = self.font_big.render("SELECT PROFILE", True, C_HUD)
+        self.screen.blit(sub, (cx - sub.get_width()//2, 90))
+
+        if self.profile_naming:
+            # Name entry screen
+            prompt = self.font_big.render("Enter your name:", True, C_NEON_CYAN)
+            self.screen.blit(prompt, (cx - prompt.get_width()//2, 180))
+            # Blinking cursor
+            cursor_ch = "_" if int(time.time() * 3) % 2 == 0 else " "
+            name_text = self.profile_name_buf + cursor_ch
+            name_surf = self.font_title.render(name_text, True, C_STAR_GOLD)
+            self.screen.blit(name_surf, (cx - name_surf.get_width()//2, 230))
+            hint = self.font.render("Type a name (max 16 chars) then press ENTER", True, C_HUD_DIM)
+            self.screen.blit(hint, (cx - hint.get_width()//2, 300))
+            return
+
+        if self.profile_animal_step:
+            # Animal selection screen
+            prompt = self.font_big.render(f"Choose your animal, {self.profile_name_buf}!", True, C_NEON_CYAN)
+            self.screen.blit(prompt, (cx - prompt.get_width()//2, 150))
+            ch = self.CHARACTERS[self.profile_animal_idx]
+            preview = make_sprite(ch["sprite"], ch["palette"], 6)
+            self.screen.blit(preview, (cx - preview.get_width()//2, 200))
+            name_s = self.font_title.render(f"< {ch['name']} >", True, ch['color'])
+            self.screen.blit(name_s, (cx - name_s.get_width()//2, 420))
+            ability_s = self.font_menu.render(ch['ability'], True, C_HUD_DIM)
+            self.screen.blit(ability_s, (cx - ability_s.get_width()//2, 465))
+            hint = self.font.render("LEFT/RIGHT to browse, ENTER to confirm", True, C_HUD_DIM)
+            self.screen.blit(hint, (cx - hint.get_width()//2, 500))
+            return
+
+        # Profile list
+        list_x = cx - 200
+        list_y_start = 130
+        item_h = 50
+        total = len(self.profile_list) + 1
+
+        for i in range(total):
+            y = list_y_start + i * item_h
+            if y > HEIGHT - 100:
+                break  # Don't draw off screen
+            selected = (i == self.profile_cursor)
+            if selected:
+                sel_bar = pygame.Surface((400, item_h - 4), pygame.SRCALPHA)
+                sel_bar.fill((*C_NEON_CYAN, 25))
+                self.screen.blit(sel_bar, (list_x, y))
+                arrow = self.font_big.render(">", True, C_NEON_CYAN)
+                self.screen.blit(arrow, (list_x - 25, y + 8))
+
+            if i < len(self.profile_list):
+                p = self.profile_list[i]
+                name_color = C_NEON_CYAN if selected else C_HUD
+                name_s = self.font_big.render(p["name"], True, name_color)
+                self.screen.blit(name_s, (list_x + 10, y + 2))
+                level, xp_into, xp_needed = save_system.xp_progress(p.get("xp", 0))
+                detail = f"Lv.{level} | {p.get('animal_base', 'wolf')} | XP: {p.get('xp', 0)}"
+                detail_s = self.font.render(detail, True, (120, 120, 140))
+                self.screen.blit(detail_s, (list_x + 10, y + 28))
+                # Mini XP bar
+                bar_w, bar_h = 100, 4
+                bar_x = list_x + 300
+                bar_y_pos = y + 14
+                pygame.draw.rect(self.screen, (30, 25, 50), (bar_x, bar_y_pos, bar_w, bar_h))
+                fill = int(bar_w * xp_into / max(1, xp_needed))
+                pygame.draw.rect(self.screen, C_NEON_CYAN, (bar_x, bar_y_pos, fill, bar_h))
+            else:
+                # NEW PROFILE option
+                new_color = C_NEON_GREEN if selected else C_HUD_DIM
+                new_s = self.font_big.render("+ NEW PROFILE", True, new_color)
+                self.screen.blit(new_s, (list_x + 10, y + 8))
+
+        hint = self.font.render("UP/DOWN to select, ENTER to confirm, ESC to quit", True, C_HUD_DIM)
+        self.screen.blit(hint, (cx - hint.get_width()//2, HEIGHT - 40))
 
     def _cleanup(self):
         # Stop Ableton if recording
