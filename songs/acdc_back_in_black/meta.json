@@ -3,7 +3,7 @@
   "artist": "AC/DC",
   "bpm": 92,
   "key": "E",
-  "bars": 16,
+  "bars": 32,
   "difficulty": 3,
   "instruments": [
     "drums",

@@ -3,11 +3,12 @@
   "artist": "Jimi Hendrix",
   "bpm": 88,
   "key": "Eb",
-  "bars": 16,
+  "bars": 32,
   "difficulty": 5,
   "instruments": [
     "drums",
     "guitar",
     "bass"
-  ]
+  ],
+  "structure": "intro(4)-verse(8)-chorus(4)-verse(8)-solo(4)-outro(4)"
 }

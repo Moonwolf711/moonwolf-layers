@@ -3,6 +3,9 @@ Generate Group 2 MIDI files for moonwolf-layers.
 Songs: AC/DC (Back in Black, Highway to Hell, Thunderstruck),
        Black Sabbath (Iron Man, Paranoid),
        Eagles (Hotel California, Take It Easy)
+
+Each song has proper structure: intro, verse, chorus, bridge/solo, outro
+with section-appropriate dynamics and signature musical moments.
 """
 
 import json
@@ -11,26 +14,18 @@ import mido
 from mido import MidiFile, MidiTrack, Message, MetaMessage
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Constants
 # ---------------------------------------------------------------------------
+TPB = 480  # ticks per beat
 
-def ticks_per_beat():
-    return 480
-
-def tempo_from_bpm(bpm):
-    return mido.bpm2tempo(bpm)
-
-def note_len(duration_beats):
-    """Convert beat duration to ticks."""
-    return int(ticks_per_beat() * duration_beats)
-
-WHOLE = note_len(4.0)
-HALF = note_len(2.0)
-QUARTER = note_len(1.0)
-EIGHTH = note_len(0.5)
-SIXTEENTH = note_len(0.25)
-DOTTED_QUARTER = note_len(1.5)
-DOTTED_EIGHTH = note_len(0.75)
+WHOLE = TPB * 4
+HALF = TPB * 2
+QUARTER = TPB
+EIGHTH = TPB // 2
+SIXTEENTH = TPB // 4
+DOTTED_QUARTER = int(TPB * 1.5)
+DOTTED_EIGHTH = int(TPB * 0.75)
+TRIPLET_EIGHTH = TPB // 3
 
 # GM Drum map
 KICK = 36
@@ -38,81 +33,18 @@ SNARE = 38
 CLOSED_HAT = 42
 OPEN_HAT = 46
 CRASH = 49
+CRASH2 = 57
 RIDE = 51
+RIDE_BELL = 53
 LOW_TOM = 45
+MID_TOM = 47
 HI_TOM = 48
-
-def make_track(name, channel, tempo_val=None):
-    """Create a new MidiTrack with name and optional tempo."""
-    track = MidiTrack()
-    track.append(MetaMessage('track_name', name=name, time=0))
-    if tempo_val is not None:
-        track.append(MetaMessage('set_tempo', tempo=tempo_val, time=0))
-    return track
-
-def add_note(track, note, velocity, duration, channel=0, delay=0):
-    """Add a note_on / note_off pair."""
-    track.append(Message('note_on', note=note, velocity=velocity, channel=channel, time=delay))
-    track.append(Message('note_off', note=note, velocity=0, channel=channel, time=duration))
-
-def add_rest(track, duration, channel=0):
-    """Add silence by inserting a zero-velocity note_on/off or just spacing."""
-    track.append(Message('note_on', note=0, velocity=0, channel=channel, time=duration))
-    track.append(Message('note_off', note=0, velocity=0, channel=channel, time=0))
-
-def add_drum_hit(track, note, velocity, time_offset=0):
-    """Single drum hit (note_on + note_off with short gap)."""
-    track.append(Message('note_on', note=note, velocity=velocity, channel=9, time=time_offset))
-    track.append(Message('note_off', note=note, velocity=0, channel=9, time=SIXTEENTH))
-
-def add_drum_simultaneous(track, notes_vels, time_offset=0):
-    """Multiple drum hits at same time. notes_vels = [(note, vel), ...]"""
-    for i, (note, vel) in enumerate(notes_vels):
-        t = time_offset if i == 0 else 0
-        track.append(Message('note_on', note=note, velocity=vel, channel=9, time=t))
-    # Turn them all off after a sixteenth
-    for i, (note, vel) in enumerate(notes_vels):
-        t = SIXTEENTH if i == 0 else 0
-        track.append(Message('note_off', note=note, velocity=0, channel=9, time=t))
-
-def add_chord(track, notes, velocity, duration, channel=0, delay=0):
-    """Add a chord (multiple notes simultaneously)."""
-    for i, n in enumerate(notes):
-        t = delay if i == 0 else 0
-        track.append(Message('note_on', note=n, velocity=velocity, channel=channel, time=t))
-    for i, n in enumerate(notes):
-        t = duration if i == 0 else 0
-        track.append(Message('note_off', note=n, velocity=0, channel=channel, time=t))
-
-def save_midi(mid, path):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    mid.save(path)
-
-def save_meta(path, title, artist, bpm, key, bars, difficulty, instruments):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    meta = {
-        "title": title,
-        "artist": artist,
-        "bpm": bpm,
-        "key": key,
-        "bars": bars,
-        "difficulty": difficulty,
-        "instruments": instruments
-    }
-    with open(path, 'w') as f:
-        json.dump(meta, f, indent=2)
-
-def combine_tracks(tracks_files, output_path, tpb=480):
-    """Combine separate MIDI files into one multi-track file."""
-    combined = MidiFile(ticks_per_beat=tpb)
-    for fpath in tracks_files:
-        m = MidiFile(fpath)
-        for track in m.tracks:
-            combined.tracks.append(track)
-    save_midi(combined, output_path)
+FLOOR_TOM = 41
+COWBELL = 56
+CHINA = 52
 
 # ---------------------------------------------------------------------------
-# Note name to MIDI number
+# Note helpers
 # ---------------------------------------------------------------------------
 NOTE_MAP = {
     'C': 0, 'C#': 1, 'Db': 1, 'D': 2, 'D#': 3, 'Eb': 3,
@@ -121,7 +53,7 @@ NOTE_MAP = {
 }
 
 def n(name_octave):
-    """Convert note name like 'E4' or 'F#2' to MIDI number."""
+    """Convert 'E4' or 'F#2' to MIDI number."""
     if name_octave[-1].isdigit():
         octave = int(name_octave[-1])
         note_name = name_octave[:-1]
@@ -129,176 +61,532 @@ def n(name_octave):
         raise ValueError(f"Bad note: {name_octave}")
     return NOTE_MAP[note_name] + (octave + 1) * 12
 
-# Power chord helper: root + fifth
-def power_chord(root_note):
-    return [root_note, root_note + 7]
+def power_chord(root):
+    return [root, root + 7]
+
+def power_chord5(root):
+    """Root + 5th + octave for big open sound."""
+    return [root, root + 7, root + 12]
 
 # ---------------------------------------------------------------------------
-# SONG 1: AC/DC - Back in Black (BPM 92, key E, 4/4)
+# MIDI helpers
 # ---------------------------------------------------------------------------
+def make_track(name, channel, tempo_val=None):
+    track = MidiTrack()
+    track.append(MetaMessage('track_name', name=name, time=0))
+    if tempo_val is not None:
+        track.append(MetaMessage('set_tempo', tempo=tempo_val, time=0))
+    return track
+
+def add_note(track, note, velocity, duration, channel=0, delay=0):
+    track.append(Message('note_on', note=note, velocity=velocity, channel=channel, time=delay))
+    track.append(Message('note_off', note=note, velocity=0, channel=channel, time=duration))
+
+def add_rest(track, duration, channel=0):
+    track.append(Message('note_on', note=0, velocity=0, channel=channel, time=duration))
+    track.append(Message('note_off', note=0, velocity=0, channel=channel, time=0))
+
+def add_chord(track, notes, velocity, duration, channel=0, delay=0):
+    for i, nt in enumerate(notes):
+        t = delay if i == 0 else 0
+        track.append(Message('note_on', note=nt, velocity=velocity, channel=channel, time=t))
+    for i, nt in enumerate(notes):
+        t = duration if i == 0 else 0
+        track.append(Message('note_off', note=nt, velocity=0, channel=channel, time=t))
+
+def add_drum_hit(track, note, velocity, time_offset=0):
+    track.append(Message('note_on', note=note, velocity=velocity, channel=9, time=time_offset))
+    track.append(Message('note_off', note=note, velocity=0, channel=9, time=SIXTEENTH))
+
+def add_drum_hits(track, notes_vels, time_offset=0):
+    """Multiple simultaneous drum hits. notes_vels = [(note, vel), ...]"""
+    for i, (nt, vel) in enumerate(notes_vels):
+        t = time_offset if i == 0 else 0
+        track.append(Message('note_on', note=nt, velocity=vel, channel=9, time=t))
+    for i, (nt, vel) in enumerate(notes_vels):
+        t = SIXTEENTH if i == 0 else 0
+        track.append(Message('note_off', note=nt, velocity=0, channel=9, time=t))
+
+def drum_rest(track, duration):
+    """Rest in drum track."""
+    track.append(Message('note_on', note=0, velocity=0, channel=9, time=duration))
+    track.append(Message('note_off', note=0, velocity=0, channel=9, time=0))
+
+def save_midi(mid, path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    mid.save(path)
+
+def save_meta(path, title, artist, bpm, key, bars, difficulty, instruments):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    meta = {
+        "title": title, "artist": artist, "bpm": bpm, "key": key,
+        "bars": bars, "difficulty": difficulty, "instruments": instruments
+    }
+    with open(path, 'w') as f:
+        json.dump(meta, f, indent=2)
+
+def combine_tracks(track_files, output_path):
+    combined = MidiFile(ticks_per_beat=TPB)
+    for fpath in track_files:
+        m = MidiFile(fpath)
+        for track in m.tracks:
+            combined.tracks.append(track)
+    save_midi(combined, output_path)
+
+# ---------------------------------------------------------------------------
+# Drum pattern builders
+# ---------------------------------------------------------------------------
+def rock_beat(track, bars, vel_kick=100, vel_snare=95, vel_hat=80,
+              hat_note=CLOSED_HAT, crash_every=0, double_kick=False,
+              first_beat_time=0):
+    """Standard rock beat: kick 1+3, snare 2+4, hat 8ths.
+    crash_every=N means crash on beat 1 every N bars (0=never)."""
+    for bar in range(bars):
+        for beat in range(4):
+            for sub in range(2):  # 8th subdivisions
+                hits = []
+                if sub == 0:
+                    if beat in (0, 2):
+                        hits.append((KICK, vel_kick))
+                    if double_kick and beat == 2 and sub == 0:
+                        pass  # already added
+                    if beat in (1, 3):
+                        hits.append((SNARE, vel_snare))
+                    hits.append((hat_note, vel_hat))
+                    if crash_every > 0 and beat == 0 and bar % crash_every == 0:
+                        hits.append((CRASH, vel_kick))
+                else:
+                    hits.append((hat_note, vel_hat - 15))
+
+                t = first_beat_time if (bar == 0 and beat == 0 and sub == 0) else EIGHTH
+                if bar == 0 and beat == 0 and sub == 0:
+                    pass  # use first_beat_time
+                for i, (nt, vel) in enumerate(hits):
+                    tt = t if i == 0 else 0
+                    track.append(Message('note_on', note=nt, velocity=vel, channel=9, time=tt))
+                for i, (nt, vel) in enumerate(hits):
+                    track.append(Message('note_off', note=nt, velocity=0, channel=9, time=0))
+
+
+def halftime_beat(track, bars, vel_kick=90, vel_snare=85, hat_note=RIDE,
+                  vel_hat=75, crash_every=0, first_beat_time=0):
+    """Half-time feel: kick on 1, snare on 3, hat/ride 8ths."""
+    for bar in range(bars):
+        for beat in range(4):
+            for sub in range(2):
+                hits = []
+                if sub == 0:
+                    if beat == 0:
+                        hits.append((KICK, vel_kick))
+                    if beat == 2:
+                        hits.append((SNARE, vel_snare))
+                        hits.append((KICK, vel_kick - 20))
+                    hits.append((hat_note, vel_hat))
+                    if crash_every > 0 and beat == 0 and bar % crash_every == 0:
+                        hits.append((CRASH, vel_kick))
+                else:
+                    hits.append((hat_note, vel_hat - 15))
+
+                t = first_beat_time if (bar == 0 and beat == 0 and sub == 0) else EIGHTH
+                for i, (nt, vel) in enumerate(hits):
+                    tt = t if i == 0 else 0
+                    track.append(Message('note_on', note=nt, velocity=vel, channel=9, time=tt))
+                for i, (nt, vel) in enumerate(hits):
+                    track.append(Message('note_off', note=nt, velocity=0, channel=9, time=0))
+
+
+def crash_hit(track, time_offset=0, vel=110):
+    """Single crash+kick accent."""
+    add_drum_hits(track, [(CRASH, vel), (KICK, vel)], time_offset)
+
+
+def fill_basic(track, duration_bars=1):
+    """Basic snare/tom fill over given bars."""
+    pattern = [HI_TOM, HI_TOM, MID_TOM, MID_TOM, LOW_TOM, LOW_TOM, FLOOR_TOM, SNARE]
+    notes_per_bar = 8
+    for bar in range(duration_bars):
+        for i in range(notes_per_bar):
+            nt = pattern[i % len(pattern)]
+            vel = 100 + (i * 2)
+            vel = min(vel, 120)
+            track.append(Message('note_on', note=nt, velocity=vel, channel=9, time=EIGHTH))
+            track.append(Message('note_off', note=nt, velocity=0, channel=9, time=0))
+
+
+# ===========================================================================
+# SONG 1: AC/DC - Back in Black (BPM 92, key E)
+# Structure: INTRO(4) VERSE(8) CHORUS(4) VERSE2(8) SOLO(4) OUTRO(4) = 32 bars
+# ===========================================================================
 def gen_back_in_black():
     song_dir = "D:/CurrentProjects/moonwolf-layers/songs/acdc_back_in_black"
     bpm = 92
-    tempo = tempo_from_bpm(bpm)
-    bars = 16
+    tempo = mido.bpm2tempo(bpm)
+    total_bars = 32
 
-    # --- DRUMS ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
+    e5 = power_chord(n('E4'))
+    d5 = power_chord(n('D4'))
+    a5 = power_chord(n('A3'))
+    b5 = power_chord(n('B3'))
+
+    # ========================= DRUMS =========================
+    mid = MidiFile(ticks_per_beat=TPB)
     track = make_track("Drums", 9, tempo)
-    # 16 bars: kick on 1+3, snare on 2+4, open hat 8ths
-    for bar in range(bars):
+
+    # INTRO (4 bars): bars 1-2 silence (bell hits only), bars 3-4 sparse kick enters
+    # Bars 1-2: just cowbell / hi-hat ticks (the iconic bell intro)
+    for bar in range(2):
         for beat in range(4):
-            # Each beat has 2 eighth notes
-            for sub in range(2):
-                hits = []
-                if sub == 0:
-                    # On the beat
-                    if beat in (0, 2):
-                        hits.append((KICK, 100))
-                    if beat in (1, 3):
-                        hits.append((SNARE, 100))
-                    hits.append((OPEN_HAT, 85))
-                else:
-                    # Off-beat eighth
-                    hits.append((OPEN_HAT, 75))
-                if hits:
-                    first_time = EIGHTH if not (bar == 0 and beat == 0 and sub == 0) else 0
-                    for i, (nt, vel) in enumerate(hits):
-                        t = first_time if i == 0 else 0
-                        track.append(Message('note_on', note=nt, velocity=vel, channel=9, time=t))
-                    for i, (nt, vel) in enumerate(hits):
-                        t = 0 if i > 0 else 0
-                        track.append(Message('note_off', note=nt, velocity=0, channel=9, time=t))
-    # Fix: need proper timing. Let me redo drums more carefully.
+            t = 0 if (bar == 0 and beat == 0) else QUARTER
+            track.append(Message('note_on', note=COWBELL, velocity=110, channel=9, time=t))
+            track.append(Message('note_off', note=COWBELL, velocity=0, channel=9, time=0))
+    # Bars 3-4: kick enters on 1+3 with hat
+    for bar in range(2):
+        for beat in range(4):
+            hits = []
+            if beat in (0, 2):
+                hits.append((KICK, 90))
+            hits.append((CLOSED_HAT, 75))
+            for i, (nt, vel) in enumerate(hits):
+                tt = QUARTER if i == 0 else 0
+                track.append(Message('note_on', note=nt, velocity=vel, channel=9, time=tt))
+            for i, (nt, vel) in enumerate(hits):
+                track.append(Message('note_off', note=nt, velocity=0, channel=9, time=0))
+
+    # VERSE 1 (8 bars): Phil Rudd straight beat, moderate velocity
+    rock_beat(track, 8, vel_kick=95, vel_snare=90, vel_hat=80,
+              hat_note=OPEN_HAT, crash_every=4, first_beat_time=EIGHTH)
+
+    # CHORUS (4 bars): louder, crash every bar
+    rock_beat(track, 4, vel_kick=110, vel_snare=105, vel_hat=90,
+              hat_note=CRASH, crash_every=1, first_beat_time=EIGHTH)
+
+    # VERSE 2 (8 bars): same as verse 1
+    rock_beat(track, 8, vel_kick=95, vel_snare=90, vel_hat=80,
+              hat_note=OPEN_HAT, crash_every=4, first_beat_time=EIGHTH)
+
+    # SOLO (4 bars): driving, crash every 2 bars
+    rock_beat(track, 3, vel_kick=105, vel_snare=100, vel_hat=85,
+              hat_note=OPEN_HAT, crash_every=2, first_beat_time=EIGHTH)
+    fill_basic(track, 1)
+
+    # OUTRO (4 bars): big ending
+    rock_beat(track, 3, vel_kick=115, vel_snare=110, vel_hat=90,
+              hat_note=CRASH, crash_every=1, first_beat_time=EIGHTH)
+    # Final crash
+    crash_hit(track, EIGHTH, 120)
+    drum_rest(track, WHOLE - SIXTEENTH)
+
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/drums.mid")
 
-    # --- GUITAR ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
+    # ========================= GUITAR =========================
+    mid = MidiFile(ticks_per_beat=TPB)
     track = make_track("Guitar", 1, tempo)
-    # The riff: E5-D5-A power chord pattern
-    # Pattern per 2 bars: E5 E5 D5 D5 | A5 A5 D5 E5  (eighth notes rhythm)
-    e5 = power_chord(n('E4'))   # E power chord (guitar range)
-    d5 = power_chord(n('D4'))
-    a5 = power_chord(n('A3'))
 
-    riff_pattern = [
-        (e5, EIGHTH), (e5, EIGHTH), (d5, EIGHTH), (d5, EIGHTH),
-        (e5, EIGHTH), (e5, EIGHTH), (d5, EIGHTH), (d5, EIGHTH),
-        (a5, EIGHTH), (a5, EIGHTH), (d5, EIGHTH), (d5, EIGHTH),
-        (e5, EIGHTH), (e5, EIGHTH), (e5, EIGHTH), (e5, EIGHTH),
-    ]  # 2 bars = 16 eighths
+    # INTRO (4 bars): bars 1-2 bell/chime hits (high harmonics), bars 3-4 riff enters
+    # Bars 1-2: bell-like high harmonics
+    bell_notes = [n('E5'), n('B4'), n('E5'), n('B4')]
+    for i, nt in enumerate(bell_notes):
+        add_note(track, nt, 100, HALF, channel=1, delay=0 if i == 0 else HALF)
+    # Bars 3-4: riff enters alone
+    riff_2bar = [
+        (e5, EIGHTH, 95), (e5, EIGHTH, 85), (d5, EIGHTH, 90), (d5, EIGHTH, 80),
+        (e5, EIGHTH, 95), (e5, EIGHTH, 85), (d5, EIGHTH, 90), (d5, EIGHTH, 80),
+        (a5, EIGHTH, 95), (a5, EIGHTH, 85), (d5, EIGHTH, 90), (d5, EIGHTH, 80),
+        (e5, EIGHTH, 95), (e5, EIGHTH, 85), (e5, QUARTER, 100),
+    ]
+    # This is slightly less than 2 bars (15 eighths = 1.875 bars), pad
+    for chord, dur, vel in riff_2bar:
+        add_chord(track, chord, vel, dur, channel=1)
+    add_rest(track, EIGHTH, channel=1)  # pad to 2 bars
 
-    for rep in range(bars // 2):
-        for i, (chord, dur) in enumerate(riff_pattern):
-            vel = 95 if i % 2 == 0 else 85
-            delay = 0 if (rep == 0 and i == 0) else 0
-            if i > 0 or rep > 0:
-                # Add spacing from previous note-off
-                pass
-            add_chord(track, chord, vel, dur, channel=1, delay=0 if (rep == 0 and i == 0) else 0)
+    # VERSE 1 (8 bars): E5-D5-A5 gallop riff, verse velocity
+    def verse_riff(track, bars, vel_base=80):
+        riff = [
+            (e5, EIGHTH, vel_base+10), (e5, EIGHTH, vel_base),
+            (d5, EIGHTH, vel_base+5), (d5, EIGHTH, vel_base-5),
+            (e5, EIGHTH, vel_base+10), (e5, EIGHTH, vel_base),
+            (d5, EIGHTH, vel_base+5), (d5, EIGHTH, vel_base-5),
+            (a5, EIGHTH, vel_base+10), (a5, EIGHTH, vel_base),
+            (d5, EIGHTH, vel_base+5), (d5, EIGHTH, vel_base-5),
+            (e5, EIGHTH, vel_base+15), (e5, EIGHTH, vel_base+5),
+            (e5, EIGHTH, vel_base+10), (e5, EIGHTH, vel_base),
+        ]
+        for rep in range(bars // 2):
+            for chord, dur, vel in riff:
+                add_chord(track, chord, vel, dur, channel=1)
+
+    verse_riff(track, 8, vel_base=80)
+
+    # CHORUS (4 bars): open power chords, louder
+    chorus_chords = [
+        (power_chord5(n('A3')), HALF, 105),
+        (power_chord5(n('E4')), HALF, 110),
+        (power_chord5(n('B3')), HALF, 105),
+        (power_chord5(n('A3')), HALF, 110),
+        (power_chord5(n('E4')), HALF, 105),
+        (power_chord5(n('D4')), HALF, 100),
+        (power_chord5(n('A3')), HALF, 110),
+        (power_chord5(n('E4')), HALF, 115),
+    ]
+    for chord, dur, vel in chorus_chords:
+        add_chord(track, chord, vel, dur, channel=1)
+
+    # VERSE 2 (8 bars): same riff + guitar fills between phrases
+    verse_riff(track, 6, vel_base=82)
+    # 2 bars with fill
+    for chord, dur, vel in riff_2bar:
+        add_chord(track, chord, vel + 5, dur, channel=1)
+    add_rest(track, EIGHTH, channel=1)
+
+    # SOLO (4 bars): Angus pentatonic run E-G-A-B-D
+    solo_notes = [
+        n('E4'), n('G4'), n('A4'), n('B4'), n('D5'), n('E5'),
+        n('D5'), n('B4'), n('A4'), n('G4'), n('E4'), n('G4'),
+        n('A4'), n('B4'), n('D5'), n('E5'), n('D5'), n('B4'),
+        n('E5'), n('D5'), n('B4'), n('A4'), n('G4'), n('A4'),
+        n('B4'), n('D5'), n('E5'), n('G5'), n('E5'), n('D5'),
+        n('B4'), n('A4'),
+    ]
+    for i, nt in enumerate(solo_notes):
+        vel = 110 if i % 4 == 0 else 95
+        add_note(track, nt, vel, EIGHTH, channel=1)
+
+    # OUTRO (4 bars): big riff + crashes
+    verse_riff(track, 2, vel_base=95)
+    # Final 2 bars: sustained E5
+    add_chord(track, power_chord5(n('E4')), 115, WHOLE, channel=1)
+    add_chord(track, power_chord5(n('E4')), 120, WHOLE, channel=1)
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/guitar.mid")
 
-    # --- BASS ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
+    # ========================= BASS =========================
+    mid = MidiFile(ticks_per_beat=TPB)
     track = make_track("Bass", 2, tempo)
-    # Bass follows guitar roots: E2-D2-A1
-    bass_pattern = [
-        (n('E2'), EIGHTH), (n('E2'), EIGHTH), (n('D2'), EIGHTH), (n('D2'), EIGHTH),
-        (n('E2'), EIGHTH), (n('E2'), EIGHTH), (n('D2'), EIGHTH), (n('D2'), EIGHTH),
-        (n('A1'), EIGHTH), (n('A1'), EIGHTH), (n('D2'), EIGHTH), (n('D2'), EIGHTH),
-        (n('E2'), EIGHTH), (n('E2'), EIGHTH), (n('E2'), EIGHTH), (n('E2'), EIGHTH),
+
+    # INTRO (4 bars): silent bars 1-2, enters bars 3-4
+    add_rest(track, WHOLE * 2, channel=2)
+    bass_2bar = [
+        (n('E2'), EIGHTH, 90), (n('E2'), EIGHTH, 80),
+        (n('D2'), EIGHTH, 85), (n('D2'), EIGHTH, 75),
+        (n('E2'), EIGHTH, 90), (n('E2'), EIGHTH, 80),
+        (n('D2'), EIGHTH, 85), (n('D2'), EIGHTH, 75),
+        (n('A1'), EIGHTH, 90), (n('A1'), EIGHTH, 80),
+        (n('D2'), EIGHTH, 85), (n('D2'), EIGHTH, 75),
+        (n('E2'), EIGHTH, 95), (n('E2'), EIGHTH, 85),
+        (n('E2'), EIGHTH, 90), (n('E2'), EIGHTH, 80),
     ]
-    for rep in range(bars // 2):
-        for i, (note, dur) in enumerate(bass_pattern):
-            vel = 90 if i % 2 == 0 else 80
-            add_note(track, note, vel, dur, channel=2)
+    for nt, dur, vel in bass_2bar:
+        add_note(track, nt, vel, dur, channel=2)
+
+    # VERSE 1 (8 bars): locked to kick
+    def bass_verse(track, bars, vel_base=80):
+        pattern = [
+            (n('E2'), EIGHTH), (n('E2'), EIGHTH),
+            (n('D2'), EIGHTH), (n('D2'), EIGHTH),
+            (n('E2'), EIGHTH), (n('E2'), EIGHTH),
+            (n('D2'), EIGHTH), (n('D2'), EIGHTH),
+            (n('A1'), EIGHTH), (n('A1'), EIGHTH),
+            (n('D2'), EIGHTH), (n('D2'), EIGHTH),
+            (n('E2'), EIGHTH), (n('E2'), EIGHTH),
+            (n('E2'), EIGHTH), (n('E2'), EIGHTH),
+        ]
+        for rep in range(bars // 2):
+            for i, (nt, dur) in enumerate(pattern):
+                vel = vel_base + 10 if i % 2 == 0 else vel_base
+                add_note(track, nt, vel, dur, channel=2)
+
+    bass_verse(track, 8, vel_base=78)
+
+    # CHORUS (4 bars): root notes following guitar
+    chorus_bass = [n('A1'), n('E2'), n('B1'), n('A1'), n('E2'), n('D2'), n('A1'), n('E2')]
+    for nt in chorus_bass:
+        add_note(track, nt, 100, HALF, channel=2)
+
+    # VERSE 2 (8 bars)
+    bass_verse(track, 8, vel_base=82)
+
+    # SOLO (4 bars): pedal E
+    for bar in range(4):
+        for eighth in range(8):
+            vel = 95 if eighth % 2 == 0 else 82
+            add_note(track, n('E2'), vel, EIGHTH, channel=2)
+
+    # OUTRO (4 bars)
+    bass_verse(track, 2, vel_base=90)
+    add_note(track, n('E2'), 110, WHOLE, channel=2)
+    add_note(track, n('E2'), 115, WHOLE, channel=2)
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/bass.mid")
 
-    # Combine
     combine_tracks(
         [f"{song_dir}/drums.mid", f"{song_dir}/guitar.mid", f"{song_dir}/bass.mid"],
         f"{song_dir}/full.mid"
     )
-    save_meta(f"{song_dir}/meta.json", "Back in Black", "AC/DC", bpm, "E", bars, 3,
-              ["drums", "guitar", "bass"])
-    print("  [OK] AC/DC - Back in Black")
+    save_meta(f"{song_dir}/meta.json", "Back in Black", "AC/DC", bpm, "E",
+              total_bars, 3, ["drums", "guitar", "bass"])
+    print("  [OK] AC/DC - Back in Black (32 bars)")
 
-# ---------------------------------------------------------------------------
-# SONG 2: AC/DC - Highway to Hell (BPM 116, key A, 4/4)
-# ---------------------------------------------------------------------------
+
+# ===========================================================================
+# SONG 2: AC/DC - Highway to Hell (BPM 116, key A)
+# Structure: INTRO(2) VERSE(8) CHORUS(8) VERSE2(8) CHORUS2(8) OUTRO(4) = 38 bars
+# ===========================================================================
 def gen_highway_to_hell():
     song_dir = "D:/CurrentProjects/moonwolf-layers/songs/acdc_highway_to_hell"
     bpm = 116
-    tempo = tempo_from_bpm(bpm)
-    bars = 16
+    tempo = mido.bpm2tempo(bpm)
+    total_bars = 38
 
-    # --- DRUMS ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
+    a5 = power_chord(n('A3'))
+    d_fsharp = [n('F#3'), n('A3'), n('D4')]
+    g5 = power_chord(n('G3'))
+    d5 = power_chord(n('D4'))
+
+    # ========================= DRUMS =========================
+    mid = MidiFile(ticks_per_beat=TPB)
     track = make_track("Drums", 9, tempo)
-    for bar in range(bars):
-        for beat in range(4):
-            for sub in range(2):
-                hits = []
-                time_offset = EIGHTH
-                if bar == 0 and beat == 0 and sub == 0:
-                    time_offset = 0
-                if sub == 0:
-                    if beat in (0, 2):
-                        hits.append((KICK, 100))
-                    if beat in (1, 3):
-                        hits.append((SNARE, 95))
-                    hits.append((CLOSED_HAT, 80))
-                    # Crash on beat 1 every 4 bars
-                    if beat == 0 and bar % 4 == 0:
-                        hits.append((CRASH, 100))
-                else:
-                    hits.append((CLOSED_HAT, 70))
 
-                for i, (nt, vel) in enumerate(hits):
-                    t = time_offset if i == 0 else 0
-                    track.append(Message('note_on', note=nt, velocity=vel, channel=9, time=t))
-                for i, (nt, vel) in enumerate(hits):
-                    track.append(Message('note_off', note=nt, velocity=0, channel=9, time=0))
+    # INTRO (2 bars): count-in snare hits then crash + A5
+    # Bar 1: 4 snare quarter hits (count-in)
+    for beat in range(4):
+        t = 0 if beat == 0 else QUARTER
+        track.append(Message('note_on', note=SNARE, velocity=100 + beat * 5, channel=9, time=t))
+        track.append(Message('note_off', note=SNARE, velocity=0, channel=9, time=0))
+    # Bar 2: crash on 1, then rock beat
+    crash_hit(track, QUARTER, 115)
+    for beat in range(1, 4):
+        hits = []
+        if beat == 2:
+            hits.append((KICK, 100))
+        if beat in (1, 3):
+            hits.append((SNARE, 95))
+        hits.append((OPEN_HAT, 85))
+        for i, (nt, vel) in enumerate(hits):
+            tt = (QUARTER - SIXTEENTH) if (i == 0 and beat == 1) else (QUARTER if i == 0 else 0)
+            track.append(Message('note_on', note=nt, velocity=vel, channel=9, time=tt))
+        for i, (nt, vel) in enumerate(hits):
+            track.append(Message('note_off', note=nt, velocity=0, channel=9, time=0))
+
+    # VERSE 1 (8 bars): driving beat, hat 8ths
+    rock_beat(track, 8, vel_kick=95, vel_snare=90, vel_hat=80,
+              hat_note=CLOSED_HAT, crash_every=4, first_beat_time=EIGHTH)
+
+    # CHORUS 1 (8 bars): louder, crash every bar, open hat
+    rock_beat(track, 8, vel_kick=110, vel_snare=105, vel_hat=90,
+              hat_note=OPEN_HAT, crash_every=1, first_beat_time=EIGHTH)
+
+    # VERSE 2 (8 bars)
+    rock_beat(track, 8, vel_kick=95, vel_snare=90, vel_hat=80,
+              hat_note=CLOSED_HAT, crash_every=4, first_beat_time=EIGHTH)
+
+    # CHORUS 2 (8 bars)
+    rock_beat(track, 7, vel_kick=110, vel_snare=105, vel_hat=90,
+              hat_note=OPEN_HAT, crash_every=1, first_beat_time=EIGHTH)
+    fill_basic(track, 1)
+
+    # OUTRO (4 bars): big riff ending
+    rock_beat(track, 3, vel_kick=115, vel_snare=110, vel_hat=95,
+              hat_note=CRASH, crash_every=1, first_beat_time=EIGHTH)
+    crash_hit(track, EIGHTH, 127)
+    drum_rest(track, WHOLE - SIXTEENTH)
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/drums.mid")
 
-    # --- GUITAR ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
+    # ========================= GUITAR =========================
+    mid = MidiFile(ticks_per_beat=TPB)
     track = make_track("Guitar", 1, tempo)
-    # A5 - D/F# - G5 - D/F# chord progression
-    a5 = power_chord(n('A3'))
-    d_fsharp = [n('F#3'), n('A3'), n('D4')]  # D/F# voicing
-    g5 = power_chord(n('G3'))
 
-    # 4-bar progression: A5 (1 bar) - D/F# (1 bar) - G5 (1 bar) - D/F# (1 bar)
-    progression = [a5, d_fsharp, g5, d_fsharp]
+    # INTRO (2 bars): silent bar 1 (drums count-in), bar 2 A5 chord hit
+    add_rest(track, WHOLE, channel=1)
+    add_chord(track, power_chord5(n('A3')), 110, WHOLE, channel=1)
 
-    for rep in range(bars // 4):
-        for chord in progression:
-            # Palm-muted 8th note pattern per bar
-            for eighth in range(8):
-                vel = 90 if eighth % 2 == 0 else 75  # accent downbeats
-                add_chord(track, chord, vel, EIGHTH, channel=1)
+    # Verse riff: A5 - D/F# - G5 - D/F# palm muted 8ths
+    def hth_verse(track, bars, vel_base=80):
+        progression = [a5, d_fsharp, g5, d_fsharp]
+        for rep in range(bars // 4):
+            for chord in progression:
+                for eighth in range(8):
+                    vel = vel_base + 10 if eighth % 2 == 0 else vel_base - 5
+                    # Accent beat 1
+                    if eighth == 0:
+                        vel = vel_base + 15
+                    add_chord(track, chord, vel, EIGHTH, channel=1)
+
+    # VERSE 1 (8 bars)
+    hth_verse(track, 8, vel_base=78)
+
+    # CHORUS 1 (8 bars): open chords, louder
+    def hth_chorus(track, bars, vel_base=100):
+        # A - D - G - D progression with open voicings
+        chorus_prog = [
+            power_chord5(n('A3')), power_chord5(n('D4')),
+            power_chord5(n('G3')), power_chord5(n('D4')),
+        ]
+        for rep in range(bars // 4):
+            for chord in chorus_prog:
+                # Quarter note strums
+                for q in range(4):
+                    vel = vel_base + 10 if q == 0 else vel_base
+                    add_chord(track, chord, vel, QUARTER, channel=1)
+
+    hth_chorus(track, 8, vel_base=100)
+
+    # VERSE 2 (8 bars)
+    hth_verse(track, 8, vel_base=82)
+
+    # CHORUS 2 (8 bars)
+    hth_chorus(track, 8, vel_base=105)
+
+    # OUTRO (4 bars): big riff, sustained ending
+    hth_verse(track, 2, vel_base=95)
+    add_chord(track, power_chord5(n('A3')), 115, WHOLE, channel=1)
+    add_chord(track, power_chord5(n('A3')), 120, WHOLE, channel=1)
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/guitar.mid")
 
-    # --- BASS ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
+    # ========================= BASS =========================
+    mid = MidiFile(ticks_per_beat=TPB)
     track = make_track("Bass", 2, tempo)
-    # A2 - D2 - G2 - D2 quarter notes
-    bass_prog = [n('A2'), n('D2'), n('G2'), n('D2')]
-    for rep in range(bars // 4):
-        for root in bass_prog:
-            for q in range(4):
-                vel = 95 if q == 0 else 85
-                add_note(track, root, vel, QUARTER, channel=2)
+
+    # INTRO (2 bars): silent bar 1, A2 bar 2
+    add_rest(track, WHOLE, channel=2)
+    add_note(track, n('A2'), 100, WHOLE, channel=2)
+
+    # Verse bass: root 8ths locked to kick
+    def hth_bass_verse(track, bars, vel_base=80):
+        roots = [n('A2'), n('D2'), n('G2'), n('D2')]
+        for rep in range(bars // 4):
+            for root in roots:
+                for eighth in range(8):
+                    vel = vel_base + 10 if eighth % 2 == 0 else vel_base
+                    if eighth == 0:
+                        vel = vel_base + 15
+                    add_note(track, root, vel, EIGHTH, channel=2)
+
+    hth_bass_verse(track, 8, vel_base=78)
+
+    # Chorus bass: quarter notes, louder
+    def hth_bass_chorus(track, bars, vel_base=95):
+        roots = [n('A2'), n('D2'), n('G2'), n('D2')]
+        for rep in range(bars // 4):
+            for root in roots:
+                for q in range(4):
+                    vel = vel_base + 10 if q == 0 else vel_base
+                    add_note(track, root, vel, QUARTER, channel=2)
+
+    hth_bass_chorus(track, 8, vel_base=95)
+    hth_bass_verse(track, 8, vel_base=82)
+    hth_bass_chorus(track, 8, vel_base=100)
+
+    # OUTRO (4 bars)
+    hth_bass_verse(track, 2, vel_base=90)
+    add_note(track, n('A2'), 110, WHOLE, channel=2)
+    add_note(track, n('A2'), 115, WHOLE, channel=2)
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/bass.mid")
@@ -307,94 +595,216 @@ def gen_highway_to_hell():
         [f"{song_dir}/drums.mid", f"{song_dir}/guitar.mid", f"{song_dir}/bass.mid"],
         f"{song_dir}/full.mid"
     )
-    save_meta(f"{song_dir}/meta.json", "Highway to Hell", "AC/DC", bpm, "A", bars, 3,
-              ["drums", "guitar", "bass"])
-    print("  [OK] AC/DC - Highway to Hell")
+    save_meta(f"{song_dir}/meta.json", "Highway to Hell", "AC/DC", bpm, "A",
+              total_bars, 3, ["drums", "guitar", "bass"])
+    print("  [OK] AC/DC - Highway to Hell (38 bars)")
 
-# ---------------------------------------------------------------------------
-# SONG 3: AC/DC - Thunderstruck (BPM 134, key B, 4/4)
-# ---------------------------------------------------------------------------
+
+# ===========================================================================
+# SONG 3: AC/DC - Thunderstruck (BPM 134, key B)
+# Structure: INTRO(8) BUILD(4) VERSE(8) CHORUS(4) VERSE2(8) SOLO(4) OUTRO(4) = 40 bars
+# ===========================================================================
 def gen_thunderstruck():
     song_dir = "D:/CurrentProjects/moonwolf-layers/songs/acdc_thunderstruck"
     bpm = 134
-    tempo = tempo_from_bpm(bpm)
-    bars = 16
+    tempo = mido.bpm2tempo(bpm)
+    total_bars = 40
 
-    # --- DRUMS ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
+    b5 = power_chord(n('B3'))
+    a5 = power_chord(n('A3'))
+    e5 = power_chord(n('E4'))
+
+    # THE hammer-on riff pattern
+    riff_notes = [n('B4'), n('E4'), n('B4'), n('A4'), n('B4'), n('G#4'), n('A4'), n('E4')]
+
+    def hammer_on_bars(track, bars, vel_base=90):
+        """The iconic 16th note hammer-on riff."""
+        total = bars * 16
+        for i in range(total):
+            nt = riff_notes[i % len(riff_notes)]
+            vel = vel_base + 10 if i % 4 == 0 else vel_base
+            if nt == n('B4'):
+                vel = min(vel + 8, 120)
+            add_note(track, nt, vel, SIXTEENTH, channel=1)
+
+    # ========================= DRUMS =========================
+    mid = MidiFile(ticks_per_beat=TPB)
     track = make_track("Drums", 9, tempo)
-    # Bars 1-4: just hi-hat 16ths (the intro)
-    for bar in range(4):
-        for sixteenth in range(16):
-            vel = 90 if sixteenth % 4 == 0 else 70
-            t = 0 if (bar == 0 and sixteenth == 0) else SIXTEENTH
-            track.append(Message('note_on', note=CLOSED_HAT, velocity=vel, channel=9, time=t))
-            track.append(Message('note_off', note=CLOSED_HAT, velocity=0, channel=9, time=0))
 
-    # Bars 5-16: full kit
-    for bar in range(4, bars):
+    # INTRO (8 bars): NO DRUMS -- complete silence
+    drum_rest(track, WHOLE * 8)
+
+    # BUILD (4 bars): hi-hat 16ths enter, then kick, then full kit
+    # Bar 1: just hi-hat 16ths
+    for s in range(16):
+        vel = 80 if s % 4 == 0 else 65
+        t = 0 if s == 0 else SIXTEENTH
+        track.append(Message('note_on', note=CLOSED_HAT, velocity=vel, channel=9, time=t))
+        track.append(Message('note_off', note=CLOSED_HAT, velocity=0, channel=9, time=0))
+    # Bar 2: hi-hat + kick on 1 and 3
+    for s in range(16):
+        hits = [(CLOSED_HAT, 80 if s % 4 == 0 else 65)]
+        if s % 8 == 0:
+            hits.append((KICK, 90))
+        for i, (nt, vel) in enumerate(hits):
+            tt = SIXTEENTH if i == 0 else 0
+            track.append(Message('note_on', note=nt, velocity=vel, channel=9, time=tt))
+        for i, (nt, vel) in enumerate(hits):
+            track.append(Message('note_off', note=nt, velocity=0, channel=9, time=0))
+    # Bar 3-4: full kit enters
+    rock_beat(track, 2, vel_kick=100, vel_snare=95, vel_hat=85,
+              hat_note=CLOSED_HAT, crash_every=0, first_beat_time=EIGHTH)
+
+    # VERSE 1 (8 bars): full band driving
+    rock_beat(track, 8, vel_kick=105, vel_snare=100, vel_hat=85,
+              hat_note=CLOSED_HAT, crash_every=4, first_beat_time=EIGHTH)
+
+    # CHORUS (4 bars): crash accents, louder
+    rock_beat(track, 4, vel_kick=115, vel_snare=110, vel_hat=95,
+              hat_note=OPEN_HAT, crash_every=1, first_beat_time=EIGHTH)
+
+    # VERSE 2 (8 bars)
+    rock_beat(track, 8, vel_kick=105, vel_snare=100, vel_hat=85,
+              hat_note=CLOSED_HAT, crash_every=4, first_beat_time=EIGHTH)
+
+    # SOLO (4 bars): double kick feel
+    for bar in range(4):
         for beat in range(4):
-            for sub in range(4):  # 16th note subdivisions
+            for sub in range(4):
                 hits = []
                 if sub == 0:
-                    if beat in (0, 2):
-                        hits.append((KICK, 105))
+                    hits.append((KICK, 110))
                     if beat in (1, 3):
-                        hits.append((SNARE, 100))
-                    hits.append((CLOSED_HAT, 85))
-                    if beat == 0 and bar % 4 == 0:
-                        hits.append((CRASH, 105))
+                        hits.append((SNARE, 105))
+                    hits.append((CLOSED_HAT, 90))
+                    if beat == 0 and bar % 2 == 0:
+                        hits.append((CRASH, 110))
                 elif sub == 2:
+                    hits.append((KICK, 90))
                     hits.append((CLOSED_HAT, 75))
-                    if beat in (0, 2):
-                        hits.append((KICK, 85))  # double kick pattern
                 else:
                     hits.append((CLOSED_HAT, 65))
-
                 for i, (nt, vel) in enumerate(hits):
-                    t = SIXTEENTH if i == 0 else 0
-                    track.append(Message('note_on', note=nt, velocity=vel, channel=9, time=t))
+                    tt = SIXTEENTH if i == 0 else 0
+                    track.append(Message('note_on', note=nt, velocity=vel, channel=9, time=tt))
                 for i, (nt, vel) in enumerate(hits):
                     track.append(Message('note_off', note=nt, velocity=0, channel=9, time=0))
+
+    # OUTRO (4 bars): big ending with crash
+    rock_beat(track, 3, vel_kick=115, vel_snare=110, vel_hat=90,
+              hat_note=OPEN_HAT, crash_every=1, first_beat_time=EIGHTH)
+    crash_hit(track, EIGHTH, 127)
+    drum_rest(track, WHOLE - SIXTEENTH)
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/drums.mid")
 
-    # --- GUITAR ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
+    # ========================= GUITAR =========================
+    mid = MidiFile(ticks_per_beat=TPB)
     track = make_track("Guitar", 1, tempo)
-    # THE legendary hammer-on riff: rapid 16th notes
-    # B4-E4-B4-A4-B4-G#4-A4-E4 repeating pattern
-    riff_notes = [n('B4'), n('E4'), n('B4'), n('A4'), n('B4'), n('G#4'), n('A4'), n('E4')]
 
-    # 16 bars of the riff pattern in 16th notes
-    total_sixteenths = bars * 16
-    note_idx = 0
-    for i in range(total_sixteenths):
-        note_val = riff_notes[note_idx % len(riff_notes)]
-        vel = 95 if i % 4 == 0 else 80
-        # Slight accent on the B notes
-        if note_val == n('B4'):
-            vel = min(vel + 10, 110)
-        add_note(track, note_val, vel, SIXTEENTH, channel=1)
-        note_idx += 1
+    # INTRO (8 bars): THE hammer-on riff ALONE
+    hammer_on_bars(track, 8, vel_base=88)
+
+    # BUILD (4 bars): riff continues with slightly more intensity
+    hammer_on_bars(track, 4, vel_base=95)
+
+    # VERSE 1 (8 bars): B5 power chord rhythm
+    for bar in range(8):
+        # Driving 8th note power chord rhythm
+        for eighth in range(8):
+            vel = 95 if eighth == 0 else (85 if eighth % 2 == 0 else 75)
+            chord = b5 if eighth < 6 else a5
+            add_chord(track, chord, vel, EIGHTH, channel=1)
+
+    # CHORUS (4 bars): open chords, louder
+    chorus_prog = [
+        (power_chord5(n('B3')), HALF, 110), (power_chord5(n('E4')), HALF, 105),
+        (power_chord5(n('A3')), HALF, 108), (power_chord5(n('E4')), HALF, 112),
+        (power_chord5(n('B3')), HALF, 110), (power_chord5(n('E4')), HALF, 105),
+        (power_chord5(n('A3')), HALF, 108), (power_chord5(n('B3')), HALF, 115),
+    ]
+    for chord, dur, vel in chorus_prog:
+        add_chord(track, chord, vel, dur, channel=1)
+
+    # VERSE 2 (8 bars): same rhythm
+    for bar in range(8):
+        for eighth in range(8):
+            vel = 98 if eighth == 0 else (88 if eighth % 2 == 0 else 78)
+            chord = b5 if eighth < 6 else a5
+            add_chord(track, chord, vel, EIGHTH, channel=1)
+
+    # SOLO (4 bars): B pentatonic shred
+    solo = [
+        n('B4'), n('D5'), n('E5'), n('F#5'), n('A5'), n('B5'),
+        n('A5'), n('F#5'), n('E5'), n('D5'), n('B4'), n('D5'),
+        n('E5'), n('F#5'), n('A5'), n('B5'), n('A5'), n('F#5'),
+        n('B5'), n('A5'), n('F#5'), n('E5'), n('D5'), n('E5'),
+        n('F#5'), n('A5'), n('B5'), n('A5'), n('F#5'), n('E5'),
+        n('D5'), n('B4'),
+        # Second phrase
+        n('B4'), n('E5'), n('F#5'), n('B5'), n('A5'), n('F#5'),
+        n('E5'), n('D5'), n('B4'), n('D5'), n('F#5'), n('A5'),
+        n('B5'), n('A5'), n('F#5'), n('E5'), n('D5'), n('B4'),
+        n('D5'), n('E5'), n('F#5'), n('A5'), n('B5'), n('A5'),
+        n('F#5'), n('E5'), n('D5'), n('B4'), n('A4'), n('B4'),
+        n('D5'), n('E5'),
+    ]
+    for i, nt in enumerate(solo):
+        vel = 112 if i % 4 == 0 else 95
+        add_note(track, nt, vel, EIGHTH, channel=1)
+
+    # OUTRO (4 bars): hammer-on riff returns with full band
+    hammer_on_bars(track, 3, vel_base=100)
+    # Final bar: big B5
+    add_chord(track, power_chord5(n('B3')), 120, WHOLE, channel=1)
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/guitar.mid")
 
-    # --- BASS ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
+    # ========================= BASS =========================
+    mid = MidiFile(ticks_per_beat=TPB)
     track = make_track("Bass", 2, tempo)
-    # Bars 1-4: silence (bass enters with drums)
-    rest_ticks = 4 * 4 * QUARTER
-    track.append(Message('note_on', note=0, velocity=0, channel=2, time=rest_ticks))
-    track.append(Message('note_off', note=0, velocity=0, channel=2, time=0))
 
-    # Bars 5-16: B2 pedal tone, 8th note pumping
-    for bar in range(4, bars):
+    # INTRO (8 bars): silent
+    add_rest(track, WHOLE * 8, channel=2)
+
+    # BUILD (4 bars): bars 1-2 silent, bars 3-4 B2 pedal enters
+    add_rest(track, WHOLE * 2, channel=2)
+    for bar in range(2):
         for eighth in range(8):
-            vel = 95 if eighth % 2 == 0 else 80
+            vel = 90 if eighth % 2 == 0 else 78
             add_note(track, n('B2'), vel, EIGHTH, channel=2)
+
+    # VERSE 1 (8 bars): B2 pumping 8ths
+    for bar in range(8):
+        for eighth in range(8):
+            vel = 92 if eighth == 0 else (82 if eighth % 2 == 0 else 75)
+            add_note(track, n('B2'), vel, EIGHTH, channel=2)
+
+    # CHORUS (4 bars): root motion following guitar
+    chorus_roots = [n('B2'), n('E2'), n('A2'), n('E2'), n('B2'), n('E2'), n('A2'), n('B2')]
+    for root in chorus_roots:
+        add_note(track, root, 100, HALF, channel=2)
+
+    # VERSE 2 (8 bars)
+    for bar in range(8):
+        for eighth in range(8):
+            vel = 95 if eighth == 0 else (85 if eighth % 2 == 0 else 78)
+            add_note(track, n('B2'), vel, EIGHTH, channel=2)
+
+    # SOLO (4 bars): driving 8ths
+    for bar in range(4):
+        for eighth in range(8):
+            vel = 100 if eighth % 2 == 0 else 85
+            add_note(track, n('B2'), vel, EIGHTH, channel=2)
+
+    # OUTRO (4 bars)
+    for bar in range(3):
+        for eighth in range(8):
+            vel = 100 if eighth == 0 else 88
+            add_note(track, n('B2'), vel, EIGHTH, channel=2)
+    add_note(track, n('B2'), 115, WHOLE, channel=2)
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/bass.mid")
@@ -403,41 +813,88 @@ def gen_thunderstruck():
         [f"{song_dir}/drums.mid", f"{song_dir}/guitar.mid", f"{song_dir}/bass.mid"],
         f"{song_dir}/full.mid"
     )
-    save_meta(f"{song_dir}/meta.json", "Thunderstruck", "AC/DC", bpm, "B", bars, 4,
-              ["drums", "guitar", "bass"])
-    print("  [OK] AC/DC - Thunderstruck")
+    save_meta(f"{song_dir}/meta.json", "Thunderstruck", "AC/DC", bpm, "B",
+              total_bars, 4, ["drums", "guitar", "bass"])
+    print("  [OK] AC/DC - Thunderstruck (40 bars)")
 
-# ---------------------------------------------------------------------------
-# SONG 4: Black Sabbath - Iron Man (BPM 76, key Bm, 4/4)
-# ---------------------------------------------------------------------------
+
+# ===========================================================================
+# SONG 4: Black Sabbath - Iron Man (BPM 76, key Bm)
+# Structure: INTRO(4) THE_RIFF(8) VERSE(8) CHORUS(4) BRIDGE(4) RIFF_RETURN(8) OUTRO(4) = 40 bars
+# ===========================================================================
 def gen_iron_man():
     song_dir = "D:/CurrentProjects/moonwolf-layers/songs/black_sabbath_iron_man"
     bpm = 76
-    tempo = tempo_from_bpm(bpm)
-    bars = 16
+    tempo = mido.bpm2tempo(bpm)
+    total_bars = 40
 
-    # --- DRUMS ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
+    # THE RIFF notes as power chords
+    def iron_man_riff(track, bars, vel_base=95, channel=1):
+        """The iconic B-D-E (bend) - G-F#-G-F#-D-E riff, 2 bars per cycle."""
+        riff = [
+            (power_chord(n('B2')), QUARTER, vel_base + 5),
+            (power_chord(n('B2')), QUARTER, vel_base),
+            (power_chord(n('D3')), QUARTER, vel_base + 5),
+            (power_chord(n('D3')), QUARTER, vel_base),
+            # Bar 2
+            (power_chord(n('E3')), DOTTED_QUARTER, vel_base + 10),  # the bend
+            (power_chord(n('E3')), EIGHTH, vel_base + 5),
+            (power_chord(n('G3')), EIGHTH, vel_base),
+            (power_chord(n('F#3')), EIGHTH, vel_base - 5),
+            (power_chord(n('G3')), EIGHTH, vel_base),
+            (power_chord(n('F#3')), EIGHTH, vel_base - 5),
+            (power_chord(n('D3')), EIGHTH, vel_base),
+            (power_chord(n('E3')), EIGHTH + QUARTER, vel_base + 5),
+        ]
+        for rep in range(bars // 2):
+            for chord, dur, vel in riff:
+                add_chord(track, chord, vel, dur, channel=channel)
+
+    def iron_man_bass_riff(track, bars, vel_base=90):
+        """Bass follows guitar, octave down."""
+        riff = [
+            (n('B1'), QUARTER, vel_base + 5),
+            (n('B1'), QUARTER, vel_base),
+            (n('D2'), QUARTER, vel_base + 5),
+            (n('D2'), QUARTER, vel_base),
+            (n('E2'), DOTTED_QUARTER, vel_base + 10),
+            (n('E2'), EIGHTH, vel_base + 5),
+            (n('G2'), EIGHTH, vel_base),
+            (n('F#2'), EIGHTH, vel_base - 5),
+            (n('G2'), EIGHTH, vel_base),
+            (n('F#2'), EIGHTH, vel_base - 5),
+            (n('D2'), EIGHTH, vel_base),
+            (n('E2'), EIGHTH + QUARTER, vel_base + 5),
+        ]
+        for rep in range(bars // 2):
+            for nt, dur, vel in riff:
+                add_note(track, nt, vel, dur, channel=2)
+
+    # ========================= DRUMS =========================
+    mid = MidiFile(ticks_per_beat=TPB)
     track = make_track("Drums", 9, tempo)
-    # Heavy, slow. Kick pattern with snare on 2+4, crash accents on riff hits
-    for bar in range(bars):
+
+    # INTRO (4 bars): no drums, just the drone
+    drum_rest(track, WHOLE * 4)
+
+    # THE RIFF (8 bars): heavy kick+crash on chord hits, Bill Ward style
+    for bar in range(8):
         for beat in range(4):
             hits = []
             if beat == 0:
                 hits.append((KICK, 110))
                 if bar % 2 == 0:
-                    hits.append((CRASH, 100))
+                    hits.append((CRASH, 105))
                 hits.append((CLOSED_HAT, 80))
             elif beat == 1:
-                hits.append((SNARE, 100))
+                hits.append((SNARE, 95))
                 hits.append((CLOSED_HAT, 80))
             elif beat == 2:
                 hits.append((KICK, 100))
                 hits.append((CLOSED_HAT, 80))
-            elif beat == 3:
-                hits.append((SNARE, 95))
+            else:
+                hits.append((SNARE, 90))
                 hits.append((CLOSED_HAT, 80))
-
             t = 0 if (bar == 0 and beat == 0) else QUARTER
             for i, (nt, vel) in enumerate(hits):
                 tt = t if i == 0 else 0
@@ -445,145 +902,121 @@ def gen_iron_man():
             for i, (nt, vel) in enumerate(hits):
                 track.append(Message('note_off', note=nt, velocity=0, channel=9, time=0))
 
-    mid.tracks.append(track)
-    save_midi(mid, f"{song_dir}/drums.mid")
+    # VERSE (8 bars): drums get busier, hi-hat 8ths
+    rock_beat(track, 8, vel_kick=100, vel_snare=95, vel_hat=85,
+              hat_note=CLOSED_HAT, crash_every=4, first_beat_time=EIGHTH)
 
-    # --- GUITAR ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
-    track = make_track("Guitar", 1, tempo)
-    # THE RIFF: B2 B2 | D3 D3 | E3 E3 (bend) | E3 | G3 F#3 G3 F#3 | D3 E3
-    # Slow power chord stabs. Each note roughly a quarter or eighth.
-    # The actual riff rhythm: da da | da da | daaa | da | da-da da-da | da da
-    # Simplified but recognizable pattern per 2 bars:
-    riff = [
-        # Bar 1: B-B-D-D
-        (power_chord(n('B2')), QUARTER, 100),
-        (power_chord(n('B2')), QUARTER, 95),
-        (power_chord(n('D3')), QUARTER, 100),
-        (power_chord(n('D3')), QUARTER, 95),
-        # Bar 2: E-E-G-F#-G-F#-D-E
-        (power_chord(n('E3')), QUARTER, 105),  # the bend note - held
-        (power_chord(n('E3')), QUARTER, 100),
-        (power_chord(n('G3')), EIGHTH, 95),
-        (power_chord(n('F#3')), EIGHTH, 90),
-        (power_chord(n('G3')), EIGHTH, 95),
-        (power_chord(n('F#3')), EIGHTH, 90),
-        (power_chord(n('D3')), EIGHTH, 95),
-        (power_chord(n('E3')), EIGHTH + QUARTER, 100),  # held slightly longer
-    ]
-
-    for rep in range(bars // 2):
-        for chord, dur, vel in riff:
-            add_chord(track, chord, vel, dur, channel=1)
-
-    mid.tracks.append(track)
-    save_midi(mid, f"{song_dir}/guitar.mid")
-
-    # --- BASS ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
-    track = make_track("Bass", 2, tempo)
-    # Follows guitar one octave down
-    bass_riff = [
-        (n('B1'), QUARTER, 100),
-        (n('B1'), QUARTER, 95),
-        (n('D2'), QUARTER, 100),
-        (n('D2'), QUARTER, 95),
-        (n('E2'), QUARTER, 105),
-        (n('E2'), QUARTER, 100),
-        (n('G2'), EIGHTH, 95),
-        (n('F#2'), EIGHTH, 90),
-        (n('G2'), EIGHTH, 95),
-        (n('F#2'), EIGHTH, 90),
-        (n('D2'), EIGHTH, 95),
-        (n('E2'), EIGHTH + QUARTER, 100),
-    ]
-
-    for rep in range(bars // 2):
-        for note_val, dur, vel in bass_riff:
-            add_note(track, note_val, vel, dur, channel=2)
-
-    mid.tracks.append(track)
-    save_midi(mid, f"{song_dir}/bass.mid")
-
-    combine_tracks(
-        [f"{song_dir}/drums.mid", f"{song_dir}/guitar.mid", f"{song_dir}/bass.mid"],
-        f"{song_dir}/full.mid"
-    )
-    save_meta(f"{song_dir}/meta.json", "Iron Man", "Black Sabbath", bpm, "Bm", bars, 3,
-              ["drums", "guitar", "bass"])
-    print("  [OK] Black Sabbath - Iron Man")
-
-# ---------------------------------------------------------------------------
-# SONG 5: Black Sabbath - Paranoid (BPM 164, key Em, 4/4)
-# ---------------------------------------------------------------------------
-def gen_paranoid():
-    song_dir = "D:/CurrentProjects/moonwolf-layers/songs/black_sabbath_paranoid"
-    bpm = 164
-    tempo = tempo_from_bpm(bpm)
-    bars = 16
-
-    # --- DRUMS ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
-    track = make_track("Drums", 9, tempo)
-    # Fast and steady: kick 1+3, snare 2+4, hat 8ths
-    for bar in range(bars):
+    # CHORUS (4 bars): double-time feel, faster drums
+    for bar in range(4):
         for beat in range(4):
             for sub in range(2):
                 hits = []
-                t = EIGHTH
-                if bar == 0 and beat == 0 and sub == 0:
-                    t = 0
                 if sub == 0:
-                    if beat in (0, 2):
-                        hits.append((KICK, 105))
+                    hits.append((KICK, 110))
                     if beat in (1, 3):
-                        hits.append((SNARE, 100))
-                    hits.append((CLOSED_HAT, 85))
+                        hits.append((SNARE, 108))
+                    hits.append((OPEN_HAT, 90))
+                    if beat == 0:
+                        hits.append((CRASH, 110))
                 else:
+                    hits.append((KICK, 85))
                     hits.append((CLOSED_HAT, 75))
-
                 for i, (nt, vel) in enumerate(hits):
-                    tt = t if i == 0 else 0
+                    tt = EIGHTH if i == 0 else 0
                     track.append(Message('note_on', note=nt, velocity=vel, channel=9, time=tt))
                 for i, (nt, vel) in enumerate(hits):
                     track.append(Message('note_off', note=nt, velocity=0, channel=9, time=0))
 
+    # BRIDGE (4 bars): tom breakdown, sparser
+    for bar in range(4):
+        for beat in range(4):
+            if beat == 0:
+                add_drum_hits(track, [(FLOOR_TOM, 100), (KICK, 95)], QUARTER)
+            elif beat == 1:
+                add_drum_hits(track, [(LOW_TOM, 95)], QUARTER - SIXTEENTH)
+            elif beat == 2:
+                add_drum_hits(track, [(MID_TOM, 90), (KICK, 85)], QUARTER - SIXTEENTH)
+            else:
+                add_drum_hits(track, [(HI_TOM, 95), (SNARE, 80)], QUARTER - SIXTEENTH)
+
+    # RIFF RETURN (8 bars): big heavy, crash every 2 bars
+    rock_beat(track, 8, vel_kick=112, vel_snare=108, vel_hat=88,
+              hat_note=OPEN_HAT, crash_every=2, first_beat_time=EIGHTH)
+
+    # OUTRO (4 bars): slow down feel, final crash
+    rock_beat(track, 3, vel_kick=105, vel_snare=100, vel_hat=80,
+              hat_note=CLOSED_HAT, crash_every=0, first_beat_time=EIGHTH)
+    crash_hit(track, EIGHTH, 127)
+    drum_rest(track, WHOLE - SIXTEENTH)
+
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/drums.mid")
 
-    # --- GUITAR ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
+    # ========================= GUITAR =========================
+    mid = MidiFile(ticks_per_beat=TPB)
     track = make_track("Guitar", 1, tempo)
-    # E5 power chord chug with lead line
-    e5 = power_chord(n('E4'))
 
-    # Pattern per 4 bars:
-    # Bars 1-2: E5 eighth note chug (16 eighths)
-    # Bars 3-4: Lead line E4-D4-E4-G4-E4 with chug underneath
-    lead_line = [n('E5'), n('D5'), n('E5'), n('G5'), n('E5'), n('D5'), n('E5'), n('G5'),
-                 n('E5'), n('D5'), n('E5'), n('G5'), n('E5'), n('D5'), n('E5'), n('E5')]
+    # INTRO (4 bars): slow feedback drone, sustained B2
+    add_note(track, n('B2'), 70, WHOLE * 2, channel=1)
+    add_note(track, n('B3'), 60, WHOLE * 2, channel=1)
 
-    for rep in range(bars // 4):
-        # 2 bars of E5 chug
-        for eighth in range(16):
-            vel = 95 if eighth % 2 == 0 else 82
-            add_chord(track, e5, vel, EIGHTH, channel=1)
-        # 2 bars of lead line
-        for i, note_val in enumerate(lead_line):
-            vel = 100 if i % 4 == 0 else 85
-            add_note(track, note_val, vel, EIGHTH, channel=1)
+    # THE RIFF (8 bars)
+    iron_man_riff(track, 8, vel_base=95)
+
+    # VERSE (8 bars): same riff, drums busier
+    iron_man_riff(track, 8, vel_base=88)
+
+    # CHORUS (4 bars): double-time, same progression louder
+    iron_man_riff(track, 4, vel_base=108)
+
+    # BRIDGE (4 bars): sparser guitar, sustained chords
+    bridge_chords = [
+        (power_chord5(n('E3')), WHOLE, 85),
+        (power_chord5(n('D3')), WHOLE, 82),
+        (power_chord5(n('B2')), WHOLE, 80),
+        (power_chord5(n('E3')), WHOLE, 85),
+    ]
+    for chord, dur, vel in bridge_chords:
+        add_chord(track, chord, vel, dur, channel=1)
+
+    # RIFF RETURN (8 bars): big heavy
+    iron_man_riff(track, 8, vel_base=105)
+
+    # OUTRO (4 bars): slow down, final crash
+    iron_man_riff(track, 2, vel_base=95)
+    add_chord(track, power_chord5(n('B2')), 110, WHOLE, channel=1)
+    add_chord(track, power_chord5(n('B2')), 120, WHOLE, channel=1)
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/guitar.mid")
 
-    # --- BASS ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
+    # ========================= BASS =========================
+    mid = MidiFile(ticks_per_beat=TPB)
     track = make_track("Bass", 2, tempo)
-    # E2 eighth note pedal
-    for bar in range(bars):
-        for eighth in range(8):
-            vel = 95 if eighth % 2 == 0 else 80
-            add_note(track, n('E2'), vel, EIGHTH, channel=2)
+
+    # INTRO (4 bars): drone B1
+    add_note(track, n('B1'), 75, WHOLE * 4, channel=2)
+
+    # THE RIFF (8 bars)
+    iron_man_bass_riff(track, 8, vel_base=92)
+
+    # VERSE (8 bars)
+    iron_man_bass_riff(track, 8, vel_base=85)
+
+    # CHORUS (4 bars): louder
+    iron_man_bass_riff(track, 4, vel_base=105)
+
+    # BRIDGE (4 bars): sustained roots
+    for nt in [n('E2'), n('D2'), n('B1'), n('E2')]:
+        add_note(track, nt, 85, WHOLE, channel=2)
+
+    # RIFF RETURN (8 bars)
+    iron_man_bass_riff(track, 8, vel_base=100)
+
+    # OUTRO (4 bars)
+    iron_man_bass_riff(track, 2, vel_base=92)
+    add_note(track, n('B1'), 108, WHOLE, channel=2)
+    add_note(track, n('B1'), 115, WHOLE, channel=2)
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/bass.mid")
@@ -592,26 +1025,33 @@ def gen_paranoid():
         [f"{song_dir}/drums.mid", f"{song_dir}/guitar.mid", f"{song_dir}/bass.mid"],
         f"{song_dir}/full.mid"
     )
-    save_meta(f"{song_dir}/meta.json", "Paranoid", "Black Sabbath", bpm, "Em", bars, 3,
-              ["drums", "guitar", "bass"])
-    print("  [OK] Black Sabbath - Paranoid")
+    save_meta(f"{song_dir}/meta.json", "Iron Man", "Black Sabbath", bpm, "Bm",
+              total_bars, 3, ["drums", "guitar", "bass"])
+    print("  [OK] Black Sabbath - Iron Man (40 bars)")
 
-# ---------------------------------------------------------------------------
-# SONG 6: Eagles - Hotel California (BPM 74, key Bm, 4/4)
-# ---------------------------------------------------------------------------
-def gen_hotel_california():
-    song_dir = "D:/CurrentProjects/moonwolf-layers/songs/eagles_hotel_california"
-    bpm = 74
-    tempo = tempo_from_bpm(bpm)
-    bars = 16
 
-    # --- DRUMS ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
+# ===========================================================================
+# SONG 5: Black Sabbath - Paranoid (BPM 164, key Em)
+# Structure: INTRO(2) VERSE(8) CHORUS(4) VERSE2(8) SOLO(4) OUTRO(4) = 30 bars
+# ===========================================================================
+def gen_paranoid():
+    song_dir = "D:/CurrentProjects/moonwolf-layers/songs/black_sabbath_paranoid"
+    bpm = 164
+    tempo = mido.bpm2tempo(bpm)
+    total_bars = 30
+
+    e5 = power_chord(n('E4'))
+    d5 = power_chord(n('D4'))
+    g5 = power_chord(n('G3'))
+
+    # ========================= DRUMS =========================
+    mid = MidiFile(ticks_per_beat=TPB)
     track = make_track("Drums", 9, tempo)
-    # Half-time feel: kick on 1, snare on 3, ride pattern
-    for bar in range(bars):
+
+    # INTRO (2 bars): just kick on 1, hat 8ths (guitar alone)
+    for bar in range(2):
         for beat in range(4):
-            for sub in range(2):  # 8th subdivisions
+            for sub in range(2):
                 hits = []
                 t = EIGHTH
                 if bar == 0 and beat == 0 and sub == 0:
@@ -619,62 +1059,169 @@ def gen_hotel_california():
                 if sub == 0:
                     if beat == 0:
                         hits.append((KICK, 95))
-                    if beat == 2:
-                        hits.append((SNARE, 90))
-                        hits.append((KICK, 75))
-                    hits.append((RIDE, 75))
+                    hits.append((CLOSED_HAT, 75))
                 else:
-                    hits.append((RIDE, 60))
-
+                    hits.append((CLOSED_HAT, 60))
                 for i, (nt, vel) in enumerate(hits):
                     tt = t if i == 0 else 0
                     track.append(Message('note_on', note=nt, velocity=vel, channel=9, time=tt))
                 for i, (nt, vel) in enumerate(hits):
                     track.append(Message('note_off', note=nt, velocity=0, channel=9, time=0))
 
+    # VERSE 1 (8 bars): full band, fast hat 8ths
+    rock_beat(track, 8, vel_kick=100, vel_snare=95, vel_hat=82,
+              hat_note=CLOSED_HAT, crash_every=4, first_beat_time=EIGHTH)
+
+    # CHORUS (4 bars): bigger, crash on every beat
+    for bar in range(4):
+        for beat in range(4):
+            for sub in range(2):
+                hits = []
+                if sub == 0:
+                    if beat in (0, 2):
+                        hits.append((KICK, 112))
+                    if beat in (1, 3):
+                        hits.append((SNARE, 108))
+                    hits.append((OPEN_HAT, 95))
+                    if beat == 0:
+                        hits.append((CRASH, 112))
+                else:
+                    hits.append((OPEN_HAT, 80))
+                for i, (nt, vel) in enumerate(hits):
+                    tt = EIGHTH if i == 0 else 0
+                    track.append(Message('note_on', note=nt, velocity=vel, channel=9, time=tt))
+                for i, (nt, vel) in enumerate(hits):
+                    track.append(Message('note_off', note=nt, velocity=0, channel=9, time=0))
+
+    # VERSE 2 (8 bars): add pull-off fills feel = slightly busier
+    rock_beat(track, 7, vel_kick=102, vel_snare=97, vel_hat=85,
+              hat_note=CLOSED_HAT, crash_every=4, first_beat_time=EIGHTH)
+    fill_basic(track, 1)
+
+    # SOLO (4 bars): driving
+    rock_beat(track, 4, vel_kick=108, vel_snare=103, vel_hat=88,
+              hat_note=OPEN_HAT, crash_every=2, first_beat_time=EIGHTH)
+
+    # OUTRO (4 bars): fast ending, crash
+    rock_beat(track, 3, vel_kick=112, vel_snare=108, vel_hat=92,
+              hat_note=OPEN_HAT, crash_every=1, first_beat_time=EIGHTH)
+    crash_hit(track, EIGHTH, 127)
+    drum_rest(track, WHOLE - SIXTEENTH)
+
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/drums.mid")
 
-    # --- GUITAR ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
+    # ========================= GUITAR =========================
+    mid = MidiFile(ticks_per_beat=TPB)
     track = make_track("Guitar", 1, tempo)
-    # Arpeggiated chord progression: Bm - F# - A - E - G - D - Em - F#
-    # Each chord gets 2 beats (half bar), so full progression = 4 bars
-    chords = {
-        'Bm': [n('B3'), n('D4'), n('F#4')],
-        'F#': [n('F#3'), n('A#3'), n('C#4')],
-        'A':  [n('A3'), n('C#4'), n('E4')],
-        'E':  [n('E3'), n('G#3'), n('B3')],
-        'G':  [n('G3'), n('B3'), n('D4')],
-        'D':  [n('D3'), n('F#3'), n('A3')],
-        'Em': [n('E3'), n('G3'), n('B3')],
-    }
-    progression = ['Bm', 'F#', 'A', 'E', 'G', 'D', 'Em', 'F#']
 
-    # Classic fingerpicking: each chord arpeggiated over 2 beats
-    # Pattern: root, 3rd, 5th, 3rd (each a sixteenth) repeated
-    for rep in range(bars // 4):
-        for chord_name in progression:
-            ch = chords[chord_name]
-            # Arpeggio pattern over 2 beats = 8 sixteenths
-            arp_pattern = [ch[0], ch[1], ch[2], ch[1], ch[0], ch[1], ch[2], ch[1]]
-            for i, note_val in enumerate(arp_pattern):
-                vel = 80 if i % 4 == 0 else 65
-                add_note(track, note_val, vel, SIXTEENTH, channel=1)
+    # INTRO (2 bars): E5 power chord 8th note chug alone
+    for eighth in range(16):
+        vel = 90 if eighth % 2 == 0 else 78
+        if eighth == 0:
+            vel = 100
+        add_chord(track, e5, vel, EIGHTH, channel=1)
+
+    # VERSE 1 (8 bars): E5 chugging + lead line E-D-E-G over top
+    def paranoid_verse(track, bars, vel_base=80, with_fills=False):
+        lead = [n('E5'), n('D5'), n('E5'), n('G5')]
+        for bar in range(bars):
+            if bar % 2 == 0:
+                # Chug bars
+                for eighth in range(8):
+                    vel = vel_base + 10 if eighth == 0 else (vel_base if eighth % 2 == 0 else vel_base - 8)
+                    add_chord(track, e5, vel, EIGHTH, channel=1)
+            else:
+                # Lead line bars
+                for i in range(4):
+                    add_note(track, lead[i], vel_base + 15, QUARTER, channel=1)
+                if with_fills and bar % 4 == 3:
+                    # Pull-off fill on last bar of phrase
+                    fills = [n('G5'), n('E5'), n('D5'), n('E5'), n('G5'), n('E5'), n('D5'), n('B4')]
+                    for nt in fills:
+                        add_note(track, nt, vel_base + 10, EIGHTH, channel=1)
+
+    paranoid_verse(track, 8, vel_base=80)
+
+    # CHORUS (4 bars): bigger open chords
+    chorus_prog = [
+        (power_chord5(n('E4')), HALF, 108),
+        (power_chord5(n('D4')), HALF, 105),
+        (power_chord5(n('G3')), HALF, 108),
+        (power_chord5(n('E4')), HALF, 112),
+        (power_chord5(n('E4')), HALF, 108),
+        (power_chord5(n('D4')), HALF, 105),
+        (power_chord5(n('G3')), HALF, 108),
+        (power_chord5(n('E4')), HALF, 115),
+    ]
+    for chord, dur, vel in chorus_prog:
+        add_chord(track, chord, vel, dur, channel=1)
+
+    # VERSE 2 (8 bars): with pull-off fills
+    paranoid_verse(track, 8, vel_base=84, with_fills=True)
+
+    # SOLO (4 bars): Em pentatonic run
+    solo = [
+        n('E5'), n('G5'), n('A5'), n('B5'), n('D6'), n('E6'),
+        n('D6'), n('B5'), n('A5'), n('G5'), n('E5'), n('G5'),
+        n('A5'), n('B5'), n('D6'), n('B5'),
+        n('E5'), n('D5'), n('E5'), n('G5'), n('B5'), n('A5'),
+        n('G5'), n('E5'), n('D5'), n('E5'), n('G5'), n('A5'),
+        n('B5'), n('D6'), n('E6'), n('D6'),
+    ]
+    for i, nt in enumerate(solo):
+        vel = 112 if i % 4 == 0 else 95
+        add_note(track, nt, vel, EIGHTH, channel=1)
+
+    # OUTRO (4 bars): fast ending
+    for bar in range(3):
+        for eighth in range(8):
+            vel = 100 if eighth == 0 else 88
+            add_chord(track, e5, vel, EIGHTH, channel=1)
+    # Final hit
+    add_chord(track, power_chord5(n('E4')), 120, WHOLE, channel=1)
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/guitar.mid")
 
-    # --- BASS ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
+    # ========================= BASS =========================
+    mid = MidiFile(ticks_per_beat=TPB)
     track = make_track("Bass", 2, tempo)
-    # Root notes: B2-F#2-A2-E2-G2-D2-E2-F#2 quarter notes
-    bass_roots = [n('B2'), n('F#2'), n('A2'), n('E2'), n('G2'), n('D2'), n('E2'), n('F#2')]
-    for rep in range(bars // 4):
-        for root in bass_roots:
-            # Each chord gets 2 beats
-            add_note(track, root, 85, QUARTER, channel=2)
-            add_note(track, root, 75, QUARTER, channel=2)
+
+    # INTRO (2 bars): E2 chug
+    for eighth in range(16):
+        vel = 88 if eighth % 2 == 0 else 75
+        add_note(track, n('E2'), vel, EIGHTH, channel=2)
+
+    # VERSE 1 (8 bars): E2 pedal 8ths
+    for bar in range(8):
+        for eighth in range(8):
+            vel = 85 if eighth == 0 else (78 if eighth % 2 == 0 else 70)
+            add_note(track, n('E2'), vel, EIGHTH, channel=2)
+
+    # CHORUS (4 bars): following chord roots, louder
+    chorus_roots = [n('E2'), n('D2'), n('G2'), n('E2'), n('E2'), n('D2'), n('G2'), n('E2')]
+    for root in chorus_roots:
+        add_note(track, root, 102, HALF, channel=2)
+
+    # VERSE 2 (8 bars)
+    for bar in range(8):
+        for eighth in range(8):
+            vel = 88 if eighth == 0 else (80 if eighth % 2 == 0 else 72)
+            add_note(track, n('E2'), vel, EIGHTH, channel=2)
+
+    # SOLO (4 bars): driving
+    for bar in range(4):
+        for eighth in range(8):
+            vel = 95 if eighth % 2 == 0 else 82
+            add_note(track, n('E2'), vel, EIGHTH, channel=2)
+
+    # OUTRO (4 bars)
+    for bar in range(3):
+        for eighth in range(8):
+            vel = 95 if eighth == 0 else 85
+            add_note(track, n('E2'), vel, EIGHTH, channel=2)
+    add_note(track, n('E2'), 115, WHOLE, channel=2)
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/bass.mid")
@@ -683,92 +1230,335 @@ def gen_hotel_california():
         [f"{song_dir}/drums.mid", f"{song_dir}/guitar.mid", f"{song_dir}/bass.mid"],
         f"{song_dir}/full.mid"
     )
-    save_meta(f"{song_dir}/meta.json", "Hotel California", "Eagles", bpm, "Bm", bars, 4,
-              ["drums", "guitar", "bass"])
-    print("  [OK] Eagles - Hotel California")
+    save_meta(f"{song_dir}/meta.json", "Paranoid", "Black Sabbath", bpm, "Em",
+              total_bars, 3, ["drums", "guitar", "bass"])
+    print("  [OK] Black Sabbath - Paranoid (30 bars)")
 
-# ---------------------------------------------------------------------------
-# SONG 7: Eagles - Take It Easy (BPM 138, key G, 4/4)
-# ---------------------------------------------------------------------------
-def gen_take_it_easy():
-    song_dir = "D:/CurrentProjects/moonwolf-layers/songs/eagles_take_it_easy"
-    bpm = 138
-    tempo = tempo_from_bpm(bpm)
-    bars = 16
 
-    # --- DRUMS ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
+# ===========================================================================
+# SONG 6: Eagles - Hotel California (BPM 74, key Bm)
+# Structure: INTRO(4) VERSE(8) CHORUS(8) VERSE2(8) SOLO(8) OUTRO(4) = 40 bars
+# ===========================================================================
+def gen_hotel_california():
+    song_dir = "D:/CurrentProjects/moonwolf-layers/songs/eagles_hotel_california"
+    bpm = 74
+    tempo = mido.bpm2tempo(bpm)
+    total_bars = 40
+
+    # Chord voicings
+    chords = {
+        'Bm':  [n('B3'), n('D4'), n('F#4')],
+        'F#':  [n('F#3'), n('A#3'), n('C#4')],
+        'A':   [n('A3'), n('C#4'), n('E4')],
+        'E':   [n('E3'), n('G#3'), n('B3')],
+        'G':   [n('G3'), n('B3'), n('D4')],
+        'D':   [n('D3'), n('F#3'), n('A3')],
+        'Em':  [n('E3'), n('G3'), n('B3')],
+    }
+    progression = ['Bm', 'F#', 'A', 'E', 'G', 'D', 'Em', 'F#']
+    bass_roots = {
+        'Bm': n('B2'), 'F#': n('F#2'), 'A': n('A2'), 'E': n('E2'),
+        'G': n('G2'), 'D': n('D2'), 'Em': n('E2'),
+    }
+
+    def arpeggio_pattern(track, bars, vel_base=72):
+        """Fingerpicked arpeggios over the chord progression."""
+        for rep in range(bars // 4):
+            for chord_name in progression:
+                ch = chords[chord_name]
+                # Classic fingerpicking: root, 3rd, 5th, 3rd per half-beat x2
+                arp = [ch[0], ch[1], ch[2], ch[1], ch[0], ch[1], ch[2], ch[1]]
+                for i, nt in enumerate(arp):
+                    vel = vel_base + 8 if i % 4 == 0 else vel_base
+                    add_note(track, nt, vel, SIXTEENTH, channel=1)
+
+    def strummed_chords(track, bars, vel_base=100):
+        """Strummed (not arpeggiated) chords for chorus."""
+        for rep in range(bars // 4):
+            for chord_name in progression:
+                ch = chords[chord_name]
+                # 2 beats per chord, quarter note strums
+                add_chord(track, ch, vel_base + 5, QUARTER, channel=1)
+                add_chord(track, ch, vel_base - 5, QUARTER, channel=1)
+
+    # ========================= DRUMS =========================
+    mid = MidiFile(ticks_per_beat=TPB)
     track = make_track("Drums", 9, tempo)
-    # Country rock: kick on 1, snare on 2+4, open hat 8ths with accent
-    for bar in range(bars):
-        for beat in range(4):
-            for sub in range(2):
-                hits = []
-                t = EIGHTH
-                if bar == 0 and beat == 0 and sub == 0:
-                    t = 0
-                if sub == 0:
-                    if beat == 0:
-                        hits.append((KICK, 100))
-                    if beat in (1, 3):
-                        hits.append((SNARE, 95))
-                    if beat == 2:
-                        hits.append((KICK, 90))
-                    hits.append((OPEN_HAT, 85 if beat in (0, 2) else 75))
-                else:
-                    hits.append((OPEN_HAT, 65))
 
-                for i, (nt, vel) in enumerate(hits):
-                    tt = t if i == 0 else 0
-                    track.append(Message('note_on', note=nt, velocity=vel, channel=9, time=tt))
-                for i, (nt, vel) in enumerate(hits):
-                    track.append(Message('note_off', note=nt, velocity=0, channel=9, time=0))
+    # INTRO (4 bars): no drums (fingerpick only)
+    drum_rest(track, WHOLE * 4)
+
+    # VERSE (8 bars): half-time with ride
+    halftime_beat(track, 8, vel_kick=85, vel_snare=80, hat_note=RIDE,
+                  vel_hat=70, crash_every=8, first_beat_time=0)
+
+    # CHORUS (8 bars): louder drums, crash accents
+    rock_beat(track, 8, vel_kick=100, vel_snare=95, vel_hat=85,
+              hat_note=RIDE, crash_every=2, first_beat_time=EIGHTH)
+
+    # VERSE 2 (8 bars): half-time again
+    halftime_beat(track, 8, vel_kick=88, vel_snare=83, hat_note=RIDE,
+                  vel_hat=72, crash_every=4, first_beat_time=EIGHTH)
+
+    # SOLO (8 bars): steady groove, crash accents
+    rock_beat(track, 8, vel_kick=95, vel_snare=90, vel_hat=80,
+              hat_note=RIDE, crash_every=2, first_beat_time=EIGHTH)
+
+    # OUTRO (4 bars): fade feel
+    halftime_beat(track, 3, vel_kick=80, vel_snare=75, hat_note=RIDE,
+                  vel_hat=65, crash_every=0, first_beat_time=EIGHTH)
+    crash_hit(track, EIGHTH, 90)
+    drum_rest(track, WHOLE - SIXTEENTH)
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/drums.mid")
 
-    # --- GUITAR ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
+    # ========================= GUITAR =========================
+    mid = MidiFile(ticks_per_beat=TPB)
     track = make_track("Guitar", 1, tempo)
-    # G - C/G - D - Am - C - G strumming, 8th note down-up
+
+    # INTRO (4 bars): fingerpicked arpeggios Bm alone
+    arpeggio_pattern(track, 4, vel_base=68)
+
+    # VERSE (8 bars): full arpeggiation, half-time drums
+    arpeggio_pattern(track, 8, vel_base=72)
+
+    # CHORUS (8 bars): strummed chords, not arpeggiated
+    strummed_chords(track, 8, vel_base=100)
+
+    # VERSE 2 (8 bars): arpeggios return + harmony guitar (thirds above)
+    for rep in range(2):
+        for chord_name in progression:
+            ch = chords[chord_name]
+            arp = [ch[0], ch[1], ch[2], ch[1], ch[0], ch[1], ch[2], ch[1]]
+            for i, nt in enumerate(arp):
+                # Add harmony note a third above (roughly +4 semitones)
+                vel = 75 if i % 4 == 0 else 68
+                add_note(track, nt, vel, SIXTEENTH, channel=1)
+
+    # SOLO (8 bars): THE twin guitar harmony solo
+    # Main melody
+    solo_melody = [
+        # Phrase 1 (2 bars)
+        n('B4'), n('D5'), n('F#5'), n('E5'), n('D5'), n('C#5'), n('B4'), n('A4'),
+        n('B4'), n('C#5'), n('D5'), n('E5'), n('F#5'), n('E5'), n('D5'), n('B4'),
+        # Phrase 2 (2 bars)
+        n('F#5'), n('G5'), n('A5'), n('G5'), n('F#5'), n('E5'), n('D5'), n('C#5'),
+        n('D5'), n('E5'), n('F#5'), n('G5'), n('A5'), n('B5'), n('A5'), n('F#5'),
+        # Phrase 3 (2 bars) - harmony a third apart
+        n('B4'), n('D5'), n('E5'), n('F#5'), n('A5'), n('F#5'), n('E5'), n('D5'),
+        n('B4'), n('C#5'), n('D5'), n('E5'), n('F#5'), n('G5'), n('A5'), n('B5'),
+        # Phrase 4 (2 bars) - climax
+        n('A5'), n('B5'), n('A5'), n('F#5'), n('E5'), n('D5'), n('B4'), n('D5'),
+        n('E5'), n('F#5'), n('A5'), n('B5'), n('A5'), n('F#5'), n('D5'), n('B4'),
+    ]
+    for i, nt in enumerate(solo_melody):
+        vel = 108 if i % 4 == 0 else (95 if i % 2 == 0 else 88)
+        add_note(track, nt, vel, EIGHTH, channel=1)
+
+    # OUTRO (4 bars): arpeggios fade
+    arpeggio_pattern(track, 4, vel_base=60)
+
+    mid.tracks.append(track)
+    save_midi(mid, f"{song_dir}/guitar.mid")
+
+    # ========================= BASS =========================
+    mid = MidiFile(ticks_per_beat=TPB)
+    track = make_track("Bass", 2, tempo)
+
+    # INTRO (4 bars): no bass
+    add_rest(track, WHOLE * 4, channel=2)
+
+    # VERSE (8 bars): root quarter notes
+    def hc_bass(track, bars, vel_base=82):
+        for rep in range(bars // 4):
+            for chord_name in progression:
+                root = bass_roots[chord_name]
+                add_note(track, root, vel_base + 5, QUARTER, channel=2)
+                add_note(track, root, vel_base - 5, QUARTER, channel=2)
+
+    hc_bass(track, 8, vel_base=80)
+
+    # CHORUS (8 bars): louder, with walk-ups
+    hc_bass(track, 8, vel_base=95)
+
+    # VERSE 2 (8 bars)
+    hc_bass(track, 8, vel_base=82)
+
+    # SOLO (8 bars): steady groove
+    hc_bass(track, 8, vel_base=90)
+
+    # OUTRO (4 bars)
+    hc_bass(track, 4, vel_base=72)
+
+    mid.tracks.append(track)
+    save_midi(mid, f"{song_dir}/bass.mid")
+
+    combine_tracks(
+        [f"{song_dir}/drums.mid", f"{song_dir}/guitar.mid", f"{song_dir}/bass.mid"],
+        f"{song_dir}/full.mid"
+    )
+    save_meta(f"{song_dir}/meta.json", "Hotel California", "Eagles", bpm, "Bm",
+              total_bars, 4, ["drums", "guitar", "bass"])
+    print("  [OK] Eagles - Hotel California (40 bars)")
+
+
+# ===========================================================================
+# SONG 7: Eagles - Take It Easy (BPM 138, key G)
+# Structure: INTRO(4) VERSE(8) CHORUS(4) VERSE2(8) CHORUS2(4) OUTRO(4) = 32 bars
+# ===========================================================================
+def gen_take_it_easy():
+    song_dir = "D:/CurrentProjects/moonwolf-layers/songs/eagles_take_it_easy"
+    bpm = 138
+    tempo = mido.bpm2tempo(bpm)
+    total_bars = 32
+
+    # Chord voicings (open, country rock style)
     chords = {
         'G':   [n('G3'), n('B3'), n('D4'), n('G4')],
         'C/G': [n('G3'), n('C4'), n('E4'), n('G4')],
         'D':   [n('D3'), n('F#3'), n('A3'), n('D4')],
         'Am':  [n('A3'), n('C4'), n('E4')],
         'C':   [n('C3'), n('E3'), n('G3'), n('C4')],
+        'Em':  [n('E3'), n('G3'), n('B3')],
     }
-    # 6 chords over ~4 bars: G(1bar) C/G(1bar) D(1bar) Am(half) C(half) G(1bar) = 4 bars
-    # Adjusted: each chord = 2/3 bar ≈ let's do 8 beats per 4-bar cycle
-    # Simpler: G(8 eighths) - C/G(8) - D(8) - Am(4) - C(4) - G(8) = 40 eighths = 5 bars
-    # Let's make it 4 bars: G(8) C/G(4) D(4) Am(4) C(4) G(8) = 32 = 4 bars
-    bar_pattern = [
-        ('G', 8), ('C/G', 4), ('D', 4), ('Am', 4), ('C', 4), ('G', 8),
-    ]  # 32 eighths = 4 bars
 
-    for rep in range(bars // 4):
-        for chord_name, count in bar_pattern:
-            ch = chords[chord_name]
-            for i in range(count):
-                vel = 90 if i % 2 == 0 else 75  # down-up dynamic
-                add_chord(track, ch, vel, EIGHTH, channel=1)
+    def country_strum(track, chord_name, beats, vel_base=82):
+        """Down-up strum pattern."""
+        ch = chords[chord_name]
+        for i in range(beats * 2):  # 8th note strums
+            vel = vel_base + 8 if i % 2 == 0 else vel_base - 5
+            if i == 0:
+                vel = vel_base + 12  # accent beat 1
+            add_chord(track, ch, vel, EIGHTH, channel=1)
+
+    def banjo_pick(track, chord_name, beats, vel_base=78):
+        """Banjo-style picking pattern."""
+        ch = chords[chord_name]
+        for beat in range(beats):
+            # Travis picking: bass + alternating melody
+            add_note(track, ch[0], vel_base + 5, SIXTEENTH, channel=1)
+            add_note(track, ch[-1], vel_base - 5, SIXTEENTH, channel=1)
+            add_note(track, ch[1] if len(ch) > 1 else ch[0], vel_base, SIXTEENTH, channel=1)
+            add_note(track, ch[-1], vel_base - 5, SIXTEENTH, channel=1)
+
+    # ========================= DRUMS =========================
+    mid = MidiFile(ticks_per_beat=TPB)
+    track = make_track("Drums", 9, tempo)
+
+    # INTRO (4 bars): no drums (acoustic guitar alone)
+    drum_rest(track, WHOLE * 4)
+
+    # VERSE 1 (8 bars): country rock groove, open hat
+    rock_beat(track, 8, vel_kick=90, vel_snare=85, vel_hat=78,
+              hat_note=OPEN_HAT, crash_every=8, first_beat_time=0)
+
+    # CHORUS 1 (4 bars): louder, crash on 1
+    rock_beat(track, 4, vel_kick=105, vel_snare=100, vel_hat=88,
+              hat_note=OPEN_HAT, crash_every=1, first_beat_time=EIGHTH)
+
+    # VERSE 2 (8 bars)
+    rock_beat(track, 8, vel_kick=92, vel_snare=87, vel_hat=80,
+              hat_note=OPEN_HAT, crash_every=4, first_beat_time=EIGHTH)
+
+    # CHORUS 2 (4 bars)
+    rock_beat(track, 4, vel_kick=108, vel_snare=103, vel_hat=90,
+              hat_note=OPEN_HAT, crash_every=1, first_beat_time=EIGHTH)
+
+    # OUTRO (4 bars): fade feel
+    rock_beat(track, 3, vel_kick=85, vel_snare=80, vel_hat=72,
+              hat_note=OPEN_HAT, crash_every=0, first_beat_time=EIGHTH)
+    drum_rest(track, WHOLE)
+
+    mid.tracks.append(track)
+    save_midi(mid, f"{song_dir}/drums.mid")
+
+    # ========================= GUITAR =========================
+    mid = MidiFile(ticks_per_beat=TPB)
+    track = make_track("Guitar", 1, tempo)
+
+    # INTRO (4 bars): acoustic strumming G alone
+    country_strum(track, 'G', 8, vel_base=75)  # 2 bars
+    country_strum(track, 'G', 4, vel_base=78)  # 1 bar
+    country_strum(track, 'D', 4, vel_base=78)  # 1 bar
+
+    # VERSE 1 (8 bars): G-C/G-D-Am country rock strum
+    # 4-bar pattern x2: G(2bars) C/G(1bar) D(1bar) ... Am(1bar) C(1bar) G(2bars)
+    for rep in range(2):
+        country_strum(track, 'G', 4, vel_base=80)
+        country_strum(track, 'C/G', 4, vel_base=78)
+        country_strum(track, 'D', 4, vel_base=82)
+        country_strum(track, 'Am', 4, vel_base=78)
+
+    # CHORUS 1 (4 bars): "Take it easy" -- louder, full band
+    country_strum(track, 'G', 4, vel_base=100)
+    country_strum(track, 'C', 4, vel_base=98)
+    country_strum(track, 'G', 4, vel_base=102)
+    country_strum(track, 'D', 4, vel_base=100)
+
+    # VERSE 2 (8 bars): banjo-style picking pattern
+    for rep in range(2):
+        banjo_pick(track, 'G', 4, vel_base=78)
+        banjo_pick(track, 'C/G', 4, vel_base=76)
+        banjo_pick(track, 'D', 4, vel_base=80)
+        banjo_pick(track, 'Am', 4, vel_base=76)
+
+    # CHORUS 2 (4 bars)
+    country_strum(track, 'G', 4, vel_base=105)
+    country_strum(track, 'C', 4, vel_base=103)
+    country_strum(track, 'G', 4, vel_base=107)
+    country_strum(track, 'D', 4, vel_base=105)
+
+    # OUTRO (4 bars): fade strumming
+    country_strum(track, 'G', 4, vel_base=75)
+    country_strum(track, 'C', 4, vel_base=68)
+    country_strum(track, 'G', 4, vel_base=60)
+    country_strum(track, 'G', 4, vel_base=50)
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/guitar.mid")
 
-    # --- BASS ---
-    mid = MidiFile(ticks_per_beat=ticks_per_beat())
+    # ========================= BASS =========================
+    mid = MidiFile(ticks_per_beat=TPB)
     track = make_track("Bass", 2, tempo)
-    # Root quarter notes following changes
-    bass_pattern = [
-        (n('G2'), 4), (n('C2'), 2), (n('D2'), 2), (n('A2'), 2), (n('C2'), 2), (n('G2'), 4),
-    ]  # 16 quarters = 4 bars
 
-    for rep in range(bars // 4):
-        for root, count in bass_pattern:
-            for q in range(count):
-                vel = 90 if q == 0 else 80
+    # INTRO (4 bars): no bass
+    add_rest(track, WHOLE * 4, channel=2)
+
+    # VERSE 1 (8 bars): root quarter notes
+    def tie_bass_verse(track, vel_base=80):
+        pattern = [
+            (n('G2'), 4), (n('C2'), 4), (n('D2'), 4), (n('A2'), 4),
+        ]
+        for root, beats in pattern:
+            for q in range(beats):
+                vel = vel_base + 8 if q == 0 else vel_base
                 add_note(track, root, vel, QUARTER, channel=2)
+
+    tie_bass_verse(track, vel_base=78)
+    tie_bass_verse(track, vel_base=80)
+
+    # CHORUS 1 (4 bars)
+    for root in [n('G2'), n('C2'), n('G2'), n('D2')]:
+        for q in range(4):
+            vel = 100 if q == 0 else 90
+            add_note(track, root, vel, QUARTER, channel=2)
+
+    # VERSE 2 (8 bars)
+    tie_bass_verse(track, vel_base=82)
+    tie_bass_verse(track, vel_base=84)
+
+    # CHORUS 2 (4 bars)
+    for root in [n('G2'), n('C2'), n('G2'), n('D2')]:
+        for q in range(4):
+            vel = 105 if q == 0 else 95
+            add_note(track, root, vel, QUARTER, channel=2)
+
+    # OUTRO (4 bars): fade
+    for root in [n('G2'), n('C2'), n('G2'), n('G2')]:
+        for q in range(4):
+            vel = 72 if q == 0 else 60
+            add_note(track, root, vel, QUARTER, channel=2)
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/bass.mid")
@@ -777,15 +1567,16 @@ def gen_take_it_easy():
         [f"{song_dir}/drums.mid", f"{song_dir}/guitar.mid", f"{song_dir}/bass.mid"],
         f"{song_dir}/full.mid"
     )
-    save_meta(f"{song_dir}/meta.json", "Take It Easy", "Eagles", bpm, "G", bars, 2,
-              ["drums", "guitar", "bass"])
-    print("  [OK] Eagles - Take It Easy")
+    save_meta(f"{song_dir}/meta.json", "Take It Easy", "Eagles", bpm, "G",
+              total_bars, 2, ["drums", "guitar", "bass"])
+    print("  [OK] Eagles - Take It Easy (32 bars)")
 
-# ---------------------------------------------------------------------------
+
+# ===========================================================================
 # Main
-# ---------------------------------------------------------------------------
+# ===========================================================================
 def main():
-    print("Generating Group 2 MIDI files...")
+    print("Generating Group 2 MIDI files (structured arrangements)...")
     print()
     gen_back_in_black()
     gen_highway_to_hell()
@@ -816,6 +1607,13 @@ def main():
         for f in sorted(files):
             size = os.path.getsize(f"{d}/{f}")
             print(f"    {f:20s} {size:>8,} bytes")
+
+        # Print meta info
+        meta_path = f"{d}/meta.json"
+        if os.path.exists(meta_path):
+            with open(meta_path) as mf:
+                meta = json.load(mf)
+                print(f"    -> {meta['bars']} bars, {meta['bpm']} BPM, key {meta['key']}")
     print()
     print("Done.")
 

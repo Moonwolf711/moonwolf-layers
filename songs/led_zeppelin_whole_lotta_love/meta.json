@@ -3,11 +3,12 @@
   "artist": "Led Zeppelin",
   "bpm": 90,
   "key": "E",
-  "bars": 16,
+  "bars": 32,
   "difficulty": 3,
   "instruments": [
     "drums",
     "bass",
     "guitar"
-  ]
+  ],
+  "structure": "intro(4)-verse(8)-chorus(4)-bridge(4)-verse(8)-outro(4)"
 }

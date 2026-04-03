@@ -3,11 +3,12 @@
   "artist": "The Doors",
   "bpm": 108,
   "key": "Em",
-  "bars": 16,
+  "bars": 32,
   "difficulty": 3,
   "instruments": [
     "drums",
     "keys",
     "bass"
-  ]
+  ],
+  "structure": "intro(8)-verse(8)-chorus(4)-verse(8)-outro(4)"
 }

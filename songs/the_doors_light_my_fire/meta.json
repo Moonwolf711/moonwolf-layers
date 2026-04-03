@@ -2,12 +2,13 @@
   "title": "Light My Fire",
   "artist": "The Doors",
   "bpm": 130,
-  "key": "Am/G",
-  "bars": 16,
+  "key": "Am",
+  "bars": 36,
   "difficulty": 4,
   "instruments": [
     "drums",
     "keys",
     "bass"
-  ]
+  ],
+  "structure": "intro(4)-verse(8)-chorus(4)-solo(8)-verse(8)-outro(4)"
 }
