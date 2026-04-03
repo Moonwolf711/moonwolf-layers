@@ -1683,11 +1683,17 @@ class MoonwolfLayers:
             self._update(dt)
             self._draw()
 
-            # Demo mode overlay
+            # Demo mode overlay with live stats
             if self.demo_mode and self.state in ("PLAYING", "STAR_POWER"):
-                # Show "DEMO MODE" + bot stats overlay
-                demo_surf = self.font_big.render("DEMO MODE — BOT PLAYING", True, C_STAR_GOLD)
-                self.screen.blit(demo_surf, (WIDTH // 2 - demo_surf.get_width() // 2, HEIGHT - 40))
+                pct = (self.hits / max(1, self.total_targets)) * 100 if self.total_targets > 0 else 0
+                acc_color = C_STAR_GOLD if pct >= 95 else C_NEON_GREEN if pct >= 80 else C_NEON_CYAN
+                demo_line1 = self.font_big.render("DEMO MODE", True, C_STAR_GOLD)
+                demo_line2 = self.font.render(
+                    f"Accuracy: {pct:.0f}% | Combo: {self.combo} | Hits: {self.hits}/{self.total_targets} | "
+                    f"P:{self.perfects} G:{self.greats} OK:{self.goods}",
+                    True, acc_color)
+                self.screen.blit(demo_line1, (WIDTH // 2 - demo_line1.get_width() // 2, HEIGHT - 42))
+                self.screen.blit(demo_line2, (WIDTH // 2 - demo_line2.get_width() // 2, HEIGHT - 22))
 
             pygame.display.flip()
 
@@ -1829,36 +1835,46 @@ class MoonwolfLayers:
         if self.demo_mode:
             player_x = self.camera_x + 200
 
-            # Auto-steer ship toward next uncollected melody note
-            best_ahead = 99999
-            target_y = self.p1_y
+            # Auto-steer ship — look ahead at next 2 uncollected notes
+            upcoming = []
             for pickup in self.level.pickups:
                 if pickup[3]:
                     continue
                 px, py, note, _ = pickup
                 ahead = px - player_x
-                if -20 < ahead < 500 and ahead < best_ahead:
-                    best_ahead = ahead
-                    target_y = py
+                if -20 < ahead < 600:
+                    upcoming.append((ahead, py))
+                if len(upcoming) >= 3:
+                    break
 
-            # Aggressive steering — tight proportional + velocity damping
+            if upcoming:
+                # Weighted average — closer notes matter more, but anticipate the next one
+                if len(upcoming) >= 2:
+                    w1, w2 = 0.7, 0.3
+                    target_y = upcoming[0][1] * w1 + upcoming[1][1] * w2
+                else:
+                    target_y = upcoming[0][1]
+            else:
+                target_y = self.p1_y
+
+            # PID-style steering — proportional + derivative + integral
             diff = target_y - self.p1_y
-            if abs(diff) > 3:
-                # Stronger proportional gain + anticipation (reduce overshoot)
-                p_gain = diff / 40.0
-                d_gain = -self.p1_vy / 600.0  # Dampen if already moving toward target
+            if abs(diff) > 2:
+                p_gain = diff / 25.0  # Stronger proportional
+                d_gain = -self.p1_vy / 400.0  # Velocity damping
                 joy_y = max(-1.0, min(1.0, p_gain + d_gain))
             else:
                 joy_y = 0
-                self.p1_vy *= 0.5  # Hard brake when close
+                self.p1_vy *= 0.3  # Hard brake when on target
 
-            # Auto-hit drums when targets reach the hit line
+            # Auto-hit drums — fire within the perfect window only
             for dl in self.level.drum_lanes:
                 if dl[3]:
                     continue
                 dx, lane_idx, drum_note, _ = dl
-                dist = abs(player_x - dx)
-                if dist < 20:  # Hit at perfect timing
+                dist = player_x - dx  # Positive = past target
+                # Fire when target is 0-10px ahead of hit line (guaranteed perfect)
+                if -10 <= dist <= 10:
                     self._on_fe_button(lane_idx)
 
         # Speed
@@ -1984,7 +2000,22 @@ class MoonwolfLayers:
                 dy = abs(self.p1_y - py)
 
                 # Always send the MIDI note so the song sounds right
-                collect_radius = 77 if self.soar else 55  # Eagle: +40%
+                # Adaptive collection radius — wider for fast note sequences
+                base_radius = 77 if self.soar else 55
+                # Check density: if next note is close horizontally, widen radius
+                next_dx = 999
+                for p2 in self.level.pickups:
+                    if p2[3] or p2 is pickup:
+                        continue
+                    nd = abs(p2[0] - px)
+                    if 0 < nd < next_dx:
+                        next_dx = nd
+                if next_dx < 40:  # Very dense — notes almost on top of each other
+                    collect_radius = base_radius + 30
+                elif next_dx < 80:
+                    collect_radius = base_radius + 15
+                else:
+                    collect_radius = base_radius
                 if dy < collect_radius:
                     # Ship is close — full velocity, score it
                     self.note_on(note, 100, getattr(self.level, 'midi_channel', self.p1_midi_ch))
