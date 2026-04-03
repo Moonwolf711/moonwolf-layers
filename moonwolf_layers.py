@@ -854,7 +854,20 @@ class MoonwolfLayers:
         self.star_fill_bonus = 1.0
         self.combo_shield = False
         self.combo_shield_used = False
+        self.combo_shield_max = 1
+        self.combo_shield_count = 0
         self.predator = False
+        self.venom = False
+        self.venom_timer = 0.0
+        self.soar = False
+        self.fury = False
+        self.agile = False
+        self.tank = False
+        self.frenzy = False
+        self.rage = False
+        self.flight = False
+        self.shell = False
+        self.shell_hits = 0
         self._next_note_y = None
         self._next_note_dist = 0
         self.combo_pulse = 0.0  # Visual pulse when combo increases (0..1 decays)
@@ -961,7 +974,21 @@ class MoonwolfLayers:
         self.star_fill_bonus = p1_ch['star_bonus']
         self.combo_shield = p1_ch.get('shield', False) or p2_ch.get('shield', False)
         self.predator = p1_ch.get('predator', False) or p2_ch.get('predator', False)
-        self.combo_shield_used = False  # Resets each level
+        self.venom = p1_ch.get('venom', False) or p2_ch.get('venom', False)
+        self.soar = p1_ch.get('soar', False) or p2_ch.get('soar', False)
+        self.fury = p1_ch.get('fury', False) or p2_ch.get('fury', False)
+        self.agile = p1_ch.get('agile', False) or p2_ch.get('agile', False)
+        self.tank = p1_ch.get('tank', False) or p2_ch.get('tank', False)
+        self.frenzy = p1_ch.get('frenzy', False) or p2_ch.get('frenzy', False)
+        self.rage = p1_ch.get('rage', False) or p2_ch.get('rage', False)
+        self.flight = p1_ch.get('flight', False) or p2_ch.get('flight', False)
+        self.shell = p1_ch.get('shell', False) or p2_ch.get('shell', False)
+        # Reset per-round state
+        self.combo_shield_used = False
+        self.combo_shield_max = 3 if self.tank else 1
+        self.combo_shield_count = 0
+        self.venom_timer = 0.0
+        self.shell_hits = 0
 
         self.state = "LEVEL_INTRO"
         self.state_timer = 0
@@ -1353,8 +1380,9 @@ class MoonwolfLayers:
         t.start()
 
     def _get_multiplier(self):
+        divisor = 2 if self.fury else 1  # Tiger: thresholds halved
         for threshold, mult in MULT_THRESHOLDS:
-            if self.combo >= threshold:
+            if self.combo >= threshold // divisor:
                 return mult
         return 1
 
@@ -1366,6 +1394,46 @@ class MoonwolfLayers:
 
     def _shake(self, intensity):
         self.shake_intensity = max(self.shake_intensity, intensity)
+
+    def _try_break_combo(self, popup_x, popup_y):
+        """Try to break the combo. Returns True if combo actually broke, False if protected."""
+        if self.combo <= 0:
+            return True
+        # Venom — immune to combo break while timer active
+        if self.venom and self.venom_timer > 0:
+            self.popups.add(popup_x, popup_y, "VENOM!", (80, 200, 50))
+            return False
+        # Shell — immune for N hits
+        if self.shell and self.shell_hits < 5:
+            self.shell_hits += 1
+            self.popups.add(popup_x, popup_y, f"SHELL! ({5 - self.shell_hits})", (80, 180, 80))
+            return False
+        # Combo shield (Dog) / Tank (Gorilla, 3 shields)
+        if self.combo_shield and self.combo_shield_count < self.combo_shield_max:
+            self.combo_shield_count += 1
+            remaining = self.combo_shield_max - self.combo_shield_count
+            self.popups.add(popup_x, popup_y, f"SHIELD! ({remaining})", C_NEON_GREEN)
+            return False
+        # No protection — combo breaks
+        self.combo = 0
+        return True
+
+    def _on_hit(self):
+        """Called on every successful hit — refresh venom timer, track combos."""
+        if self.venom:
+            self.venom_timer = 3.0  # 3s of miss immunity
+
+    def _score_multiplier(self, base_score, mult):
+        """Apply frenzy bonus (Shark) — +10% per combo tier."""
+        score = base_score * mult
+        if self.frenzy:
+            tier = 0
+            for threshold, m in MULT_THRESHOLDS:
+                if self.combo >= threshold:
+                    tier = m
+                    break
+            score = int(score * (1.0 + tier * 0.1))
+        return int(score)
 
     def _on_fe_button(self, btn_idx):
         """Fighting Edge button pressed."""
@@ -1396,12 +1464,13 @@ class MoonwolfLayers:
                 hit_something = True
                 self.combo += 1
                 self.combo_pulse = 1.0
+                self._on_hit()
                 self.hits += 1
                 self.perfects += 1
                 if self.combo % 10 == 0 and self.combo > 0:
                     self.combo_10s += 1
                 mult = self._get_multiplier()
-                self.score += 50 * mult * (2 if self.predator else 1)
+                self.score += self._score_multiplier(50 * (2 if self.predator else 1), mult)
                 self.star_meter = min(1.0, self.star_meter + 0.08 * self.star_fill_bonus)
                 self.popups.add(200, lane_area_top - 20, f"PERFECT! x{mult}", C_STAR_GOLD)
                 self.particles.emit(200, lane_area_top + lane * 20, 12, C_STAR_GOLD, 200)
@@ -1412,12 +1481,13 @@ class MoonwolfLayers:
                 hit_something = True
                 self.combo += 1
                 self.combo_pulse = 1.0
+                self._on_hit()
                 self.hits += 1
                 self.greats += 1
                 if self.combo % 10 == 0 and self.combo > 0:
                     self.combo_10s += 1
                 mult = self._get_multiplier()
-                self.score += 30 * mult
+                self.score += self._score_multiplier(30, mult)
                 self.star_meter = min(1.0, self.star_meter + 0.05 * self.star_fill_bonus)
                 self.popups.add(200, lane_area_top - 20, f"GREAT! x{mult}", C_NEON_GREEN)
                 self.particles.emit(200, lane_area_top + lane * 20, 8, C_NEON_GREEN, 150)
@@ -1428,12 +1498,13 @@ class MoonwolfLayers:
                 hit_something = True
                 self.combo += 1
                 self.combo_pulse = 1.0
+                self._on_hit()
                 self.hits += 1
                 self.goods += 1
                 if self.combo % 10 == 0 and self.combo > 0:
                     self.combo_10s += 1
                 mult = self._get_multiplier()
-                self.score += 10 * mult
+                self.score += self._score_multiplier(10, mult)
                 self.star_meter = min(1.0, self.star_meter + 0.03 * self.star_fill_bonus)
                 self.popups.add(200, lane_area_top - 20, f"Good x{mult}", C_HUD)
                 self.particles.emit(200, lane_area_top + lane * 20, 4, C_HUD, 80)
@@ -1445,11 +1516,7 @@ class MoonwolfLayers:
         self.max_combo = max(self.max_combo, self.combo)
 
         if not hit_something:
-            if self.combo_shield and not self.combo_shield_used and self.combo > 0:
-                self.combo_shield_used = True
-                self.popups.add(200, lane_area_top - 20, "SHIELD!", C_NEON_GREEN)
-            else:
-                self.combo = 0
+            if self._try_break_combo(200, lane_area_top - 20):
                 self.popups.add(200, lane_area_top - 20, "Miss", C_ENEMY)
 
         # Always send drum notes on DRUM_CH (9) — drum rack lives on ch10
@@ -1459,7 +1526,8 @@ class MoonwolfLayers:
         # Check star power activation
         if self.combo >= STAR_POWER_THRESHOLD and not self.star_power:
             self.star_power = True
-            self.star_power_timer = (60.0 / self.bpm) * 4 * STAR_POWER_BARS
+            sp_bars = STAR_POWER_BARS * (2 if self.rage else 1)  # Minotaur: 2x duration
+            self.star_power_timer = (60.0 / self.bpm) * 4 * sp_bars
             self.star_power_activations += 1
             self._shake(10)
             self.particles.emit(200, HEIGHT // 2, 30, C_STAR_GOLD, 300, 1.0, 5)
@@ -1650,6 +1718,10 @@ class MoonwolfLayers:
             self.beat_timer -= self.beat_interval
             self.beat_flash = 1.0
         self.beat_flash *= 0.85
+
+        # Venom timer decay
+        if self.venom_timer > 0:
+            self.venom_timer -= dt
         self.combo_pulse *= 0.88  # Combo pulse decays each frame
 
         # Lane flashes decay
@@ -1759,9 +1831,13 @@ class MoonwolfLayers:
         if is_melody_level:
             play_top = self.level.play_top
             play_bottom = self.level.play_bottom
-            thrust = 1200.0   # px/s^2 acceleration (faster for reachability)
-            drag = 4.0        # velocity decay (snappier response)
-            max_vel = 500.0   # higher top speed
+            thrust = 1800.0 if self.agile else 1200.0  # Monkey: +50% acceleration
+            if self.flight:
+                drag = 1.5    # Pegasus: minimal drag, floaty feel
+                max_vel = 600.0
+            else:
+                drag = 4.0
+                max_vel = 500.0
 
             # Note magnetism — find next uncollected note and pull toward it
             player_x = self.camera_x + 200
@@ -1820,7 +1896,8 @@ class MoonwolfLayers:
                 dy = abs(self.p1_y - py)
 
                 # Always send the MIDI note so the song sounds right
-                if dy < 55:
+                collect_radius = 77 if self.soar else 55  # Eagle: +40%
+                if dy < collect_radius:
                     # Ship is close — full velocity, score it
                     self.note_on(note, 100, self.p1_midi_ch)
                     self.hits += 1
@@ -1833,31 +1910,27 @@ class MoonwolfLayers:
 
                     if dy < 15 * self.perfect_bonus:
                         self.perfects += 1
-                        self.score += 50 * mult * (2 if self.predator else 1)
+                        self.score += self._score_multiplier(50 * (2 if self.predator else 1), mult)
                         self.star_meter = min(1.0, self.star_meter + 0.08 * self.star_fill_bonus)
                         self.popups.add(200, int(self.p1_y) - 30, f"PERFECT! x{mult}", C_STAR_GOLD)
                         self.particles.emit(200, int(py), 12, C_STAR_GOLD, 180)
                         self._shake(4)
                     elif dy < 30:
                         self.greats += 1
-                        self.score += 30 * mult
+                        self.score += self._score_multiplier(30, mult)
                         self.star_meter = min(1.0, self.star_meter + 0.05 * self.star_fill_bonus)
                         self.popups.add(200, int(self.p1_y) - 30, f"GREAT! x{mult}", C_NEON_GREEN)
                         self.particles.emit(200, int(py), 8, C_NEON_GREEN, 120)
                     else:
                         self.goods += 1
-                        self.score += 10 * mult
+                        self.score += self._score_multiplier(10, mult)
                         self.star_meter = min(1.0, self.star_meter + 0.03 * self.star_fill_bonus)
                         self.popups.add(200, int(self.p1_y) - 30, f"Good x{mult}", C_HUD)
                         self.particles.emit(200, int(py), 4, C_HUD, 60)
                 else:
                     # Ship is far — play note quietly (song stays intact) but no score
                     self.note_on(note, 50, self.p1_midi_ch)  # Quieter
-                    if self.combo_shield and not self.combo_shield_used and self.combo > 0:
-                        self.combo_shield_used = True
-                        self.popups.add(200, int(py), "SHIELD!", C_NEON_GREEN)
-                    else:
-                        self.combo = 0
+                    self._try_break_combo(200, int(py))
 
                 self.pending_offs.append((note, self.p1_midi_ch, time.time() + 0.25))
 
