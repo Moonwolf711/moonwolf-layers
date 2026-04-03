@@ -1153,9 +1153,9 @@ class MoonwolfLayers:
                 self.combo = 0
                 self.popups.add(200, lane_area_top - 20, "Miss", C_ENEMY)
 
-        # Always send the note (so you hear it even on miss) — use P2's role channel
-        self.note_on(note, 100, self.p2_midi_ch)
-        self.pending_offs.append((note, self.p2_midi_ch, time.time() + 0.15))
+        # Always send drum notes on DRUM_CH (9) — drum rack lives on ch10
+        self.note_on(note, 100, DRUM_CH)
+        self.pending_offs.append((note, DRUM_CH, time.time() + 0.15))
 
         # Check star power activation
         if self.combo >= STAR_POWER_THRESHOLD and not self.star_power:
