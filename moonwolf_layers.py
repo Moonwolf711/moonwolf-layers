@@ -564,65 +564,104 @@ TRANSPORT_CC_RECORD = 117
 # Uses LiveAPI — no extra Remote Script needed, just CoLaB loaded on a track
 import socket
 
-COLAB_HOST = "127.0.0.1"
-COLAB_PORT = 8001
+BRIDGE_HOST = "127.0.0.1"
+BRIDGE_PORT = 8002  # Moonwolf Bridge M4L device
+COLAB_PORT = 8001   # CoLaB fallback
 
 class AbletonOSC:
-    """Control Ableton via CoLaB M4L device (UDP port 8001).
-    Send plain text /live/... commands — CoLaB executes them via LiveAPI."""
-    def __init__(self, host=COLAB_HOST, port=COLAB_PORT):
+    """Control Ableton via Moonwolf Bridge M4L device (UDP port 8002).
+    Falls back to CoLaB on port 8001 if needed.
+    Send plain text /moonwolf/... commands — Bridge executes them via LiveAPI."""
+    def __init__(self, host=BRIDGE_HOST, port=BRIDGE_PORT):
         self.host = host
         self.port = port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.connected = True
-        print(f"  Ableton LiveAPI: via CoLaB UDP {host}:{port}")
+        print(f"  Ableton LiveAPI: Moonwolf Bridge UDP {host}:{port}")
 
     def send(self, command):
-        """Send a plain text command to CoLaB."""
+        """Send a plain text command to Moonwolf Bridge."""
         try:
             self.sock.sendto(command.encode('utf-8'), (self.host, self.port))
         except Exception as e:
-            print(f"  LiveAPI send error: {e}")
+            print(f"  Bridge send error: {e}")
 
+    # === Transport ===
     def set_tempo(self, bpm):
-        self.send(f"/live/song/set/tempo {bpm}")
+        self.send(f"/moonwolf/transport/tempo {bpm}")
 
     def play(self):
-        self.send("/live/song/start_playing")
+        self.send("/moonwolf/transport/play")
 
     def stop(self):
-        self.send("/live/song/stop_playing")
+        self.send("/moonwolf/transport/stop")
 
     def record(self):
-        self.send("/live/song/set/session_record 1")
+        self.send("/moonwolf/transport/record")
 
     def stop_record(self):
-        self.send("/live/song/set/session_record 0")
+        self.send("/moonwolf/transport/stop_record")
 
     def set_metronome(self, on=True):
-        self.send(f"/live/song/set/metronome {1 if on else 0}")
+        self.send(f"/moonwolf/transport/metronome {1 if on else 0}")
 
-    def fire_clip(self, track, clip):
-        self.send(f"/live/clip/fire {track} {clip}")
-
-    def stop_track(self, track):
-        self.send(f"/live/track/stop {track}")
+    # === Track management ===
+    def create_track(self, name, midi_channel=0):
+        self.send(f"/moonwolf/track/create {name} {midi_channel}")
 
     def arm_track(self, track, armed=True):
-        self.send(f"/live/track/set/arm {track} {1 if armed else 0}")
+        self.send(f"/moonwolf/track/arm {track} {1 if armed else 0}")
+
+    def arm_exclusive(self, track):
+        """Arm one track, disarm all others."""
+        self.send(f"/moonwolf/arm_all {track}")
+
+    def name_track(self, track, name):
+        self.send(f"/moonwolf/track/name {track} {name}")
 
     def mute_track(self, track, muted=True):
-        self.send(f"/live/track/set/mute {track} {1 if muted else 0}")
+        self.send(f"/moonwolf/track/mute {track} {1 if muted else 0}")
 
     def set_volume(self, track, vol):
-        self.send(f"/live/track/set/volume {track} {vol}")
+        self.send(f"/moonwolf/track/volume {track} {vol}")
 
-    def fire_scene(self, scene):
-        self.send(f"/live/scene/fire {scene}")
+    def delete_track(self, track):
+        self.send(f"/moonwolf/track/delete {track}")
 
+    # === Clip control ===
+    def fire_clip(self, track, clip):
+        self.send(f"/moonwolf/clip/fire {track} {clip}")
+
+    def stop_clips(self, track):
+        self.send(f"/moonwolf/clip/stop {track}")
+
+    def quantize_clip(self, track, clip, grid=5):
+        self.send(f"/moonwolf/clip/quantize {track} {clip} {grid}")
+
+    def loop_clip(self, track, clip, looping=True):
+        self.send(f"/moonwolf/clip/loop {track} {clip} {1 if looping else 0}")
+
+    # === Full session setup ===
+    def setup_session(self, bpm, layers):
+        """Create a full session for a song.
+        layers: list of (name, midi_channel) tuples."""
+        layer_str = ",".join(f"{name}:{ch}" for name, ch in layers)
+        self.send(f"/moonwolf/setup/session {bpm} {layer_str}")
+
+    # === Query ===
+    def query_tracks(self):
+        self.send("/moonwolf/query/tracks")
+
+    def query_tempo(self):
+        self.send("/moonwolf/query/tempo")
+
+    # === Logging ===
     def log(self, msg):
-        """Send a message to CoLaB's console."""
-        self.send(f"[INFO] {msg}")
+        """Send to CoLaB console (fallback port)."""
+        try:
+            self.sock.sendto(f"[INFO] {msg}".encode('utf-8'), (self.host, COLAB_PORT))
+        except Exception:
+            pass
 
     def close(self):
         self.sock.close()
@@ -1037,10 +1076,18 @@ class MoonwolfLayers:
         self.scroll_speed = self.level.scroll_speed
         self.beat_interval = 60.0 / self.bpm
 
-        # Sync Ableton BPM via OSC
-        self.osc.set_tempo(self.bpm)
-        self.osc.stop()  # Reset transport
-        print(f"  Ableton BPM set to {self.bpm} via OSC")
+        # Auto-setup Ableton session via Moonwolf Bridge
+        ch_map = {"drums": 9, "bass": 2, "guitar": 1, "keys": 0, "strings": 4, "horns": 3, "synth": 6, "vocals": 5}
+        if hasattr(self, 'song_list') and self.song_list:
+            song = self.song_list[self.song_idx]
+            song_data = load_song(song["folder"])
+            layer_list = [(name, ch_map.get(name, 0)) for name in song_data["tracks"].keys()]
+            self.osc.setup_session(self.bpm, layer_list)
+            print(f"  Ableton session setup: {self.bpm} BPM, layers: {', '.join(n for n,c in layer_list)}")
+        else:
+            self.osc.set_tempo(self.bpm)
+            self.osc.stop()
+            print(f"  Ableton BPM set to {self.bpm}")
 
         # Reset scoring
         self.score = 0
