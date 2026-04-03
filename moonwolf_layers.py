@@ -14,6 +14,7 @@ Usage:
 """
 
 import sys
+import os
 import math
 import time
 import random
@@ -21,6 +22,10 @@ import threading
 import numpy as np
 import pygame
 import mido
+
+# Add project dir to path for song_library import
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from song_library import get_song_list, load_song
 
 # ======================== CONFIG ========================
 WIDTH, HEIGHT = 1280, 720
@@ -576,6 +581,9 @@ class MoonwolfLayers:
         self.p2_char_idx = 1           # Fox (different default)
         self.p1_role_idx = 0           # Drums
         self.p2_role_idx = 1           # Keys
+        self.song_list = get_song_list()
+        self.song_idx = 0              # Selected song index
+        self.song_scroll_offset = 0    # For scrolling long lists
         self.available_midi = self._scan_midi_ports()
         self.detected_controllers = self._scan_controllers()
         self.fe_connected = False
@@ -690,8 +698,20 @@ class MoonwolfLayers:
         # Start FE reader
         self._start_fe_reader()
 
-        # Load levels
-        if self.midi_file:
+        # Load levels from selected song or fallback
+        if self.song_list:
+            song_info = self.song_list[self.song_idx]
+            song_folder = song_info["folder"]
+            # Load full.mid from the song library
+            song_data = load_song(song_folder)
+            full_mid_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "songs", song_folder, "full.mid")
+            if os.path.exists(full_mid_path):
+                self.bpm = song_info.get("bpm", self.bpm) or self.bpm
+                self.levels, self.bpm = load_levels_from_midi(full_mid_path, self.bpm)
+                print(f"  Song: {song_info['artist']} - {song_info['title']}")
+            else:
+                self.levels = generate_default_levels(self.bpm, self.key_name, self.is_major)
+        elif self.midi_file:
             self.levels, self.bpm = load_levels_from_midi(self.midi_file, self.bpm)
         else:
             self.levels = generate_default_levels(self.bpm, self.key_name, self.is_major)
@@ -733,8 +753,8 @@ class MoonwolfLayers:
             print(f"    {i+1}. {lv.name} ({lv.bars} bars, {lv.instrument_name}){tag}")
 
     # ===== MENU ITEMS =====
-    MENU_ITEMS_2P = ["PLAYERS", "P1 CHARACTER", "P1 ROLE", "P2 CHARACTER", "P2 ROLE", "MIDI OUTPUT", "START GAME"]
-    MENU_ITEMS_1P = ["PLAYERS", "P1 CHARACTER", "P1 ROLE", "MIDI OUTPUT", "START GAME"]
+    MENU_ITEMS_2P = ["PLAYERS", "SONG", "P1 CHARACTER", "P1 ROLE", "P2 CHARACTER", "P2 ROLE", "MIDI OUTPUT", "START GAME"]
+    MENU_ITEMS_1P = ["PLAYERS", "SONG", "P1 CHARACTER", "P1 ROLE", "MIDI OUTPUT", "START GAME"]
 
     @property
     def _menu_items(self):
@@ -760,6 +780,9 @@ class MoonwolfLayers:
         item = self._menu_items[self.menu_selection]
         if item == "PLAYERS":
             self.menu_player_mode = (self.menu_player_mode + direction) % 2
+        elif item == "SONG":
+            if self.song_list:
+                self.song_idx = (self.song_idx + direction) % len(self.song_list)
             # Clamp selection if menu shrunk
             if self.menu_selection >= self._menu_item_count():
                 self.menu_selection = self._menu_item_count() - 1
@@ -871,6 +894,25 @@ class MoonwolfLayers:
                 vc = C_NEON_GREEN if self.menu_player_mode == 1 else C_NEON_YELLOW
                 val_surf = self.font_big.render(f"< {val} >", True, vc if selected else C_HUD_DIM)
                 self.screen.blit(val_surf, (val_x, y + 2))
+
+            elif item_name == "SONG":
+                if self.song_list:
+                    song = self.song_list[self.song_idx]
+                    title_str = f"{song['artist']} - {song['title']}"
+                    if len(title_str) > 35:
+                        title_str = title_str[:32] + "..."
+                    val_surf = self.font_big.render(f"< {title_str} >", True, C_NEON_PINK if selected else C_HUD_DIM)
+                    self.screen.blit(val_surf, (val_x, y + 2))
+                    # Song details
+                    diff_str = "*" * song['difficulty'] + "." * (5 - song['difficulty'])
+                    detail = f"{song['bpm']} BPM | Key: {song['key']} | [{diff_str}]"
+                    self.screen.blit(self.font.render(detail, True, (120, 120, 140)), (val_x, y + 26))
+                    # Song counter
+                    counter = self.font.render(f"{self.song_idx + 1}/{len(self.song_list)}", True, (80, 80, 100))
+                    self.screen.blit(counter, (val_x + 380, y + 4))
+                else:
+                    val_surf = self.font_big.render("No songs found", True, C_ENEMY)
+                    self.screen.blit(val_surf, (val_x, y + 2))
 
             elif item_name == "P1 CHARACTER":
                 ch = self.CHARACTERS[self.p1_char_idx]
@@ -1738,6 +1780,12 @@ class MoonwolfLayers:
         pygame.draw.circle(glow, (*C_NEON_CYAN, int(30 * pulse)), (60, 60), 60)
         self.screen.blit(glow, (cx - 60, cy - 130))
         self.screen.blit(level_num, (cx - level_num.get_width()//2, cy - 110))
+
+        # Song name (if from library)
+        if self.song_list:
+            song = self.song_list[self.song_idx]
+            song_title = self.font_menu.render(f"{song['artist']} - {song['title']}", True, C_HUD_DIM)
+            self.screen.blit(song_title, (cx - song_title.get_width()//2, cy - 60))
 
         # Level name
         title = self.font_title.render(f"{self.level.name}", True, C_NEON_PINK)
