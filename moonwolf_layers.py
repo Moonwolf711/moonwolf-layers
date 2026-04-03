@@ -407,10 +407,23 @@ class Level:
         self.play_bottom = HEIGHT - 200
         self.play_range = self.play_bottom - self.play_top
 
+        # Compute actual note range for better vertical compression
+        if note_events:
+            notes = [n for _, n, _, _ in note_events]
+            self._note_min = min(notes)
+            self._note_max = max(notes)
+            # Ensure at least an octave of range so notes aren't all on one line
+            if self._note_max - self._note_min < 12:
+                mid = (self._note_min + self._note_max) // 2
+                self._note_min = mid - 6
+                self._note_max = mid + 6
+        else:
+            self._note_min = 30
+            self._note_max = 80
+
         # Place events
         for t, note, vel, ch in note_events:
             x = int(t * self.scroll_speed)
-            # Map note to Y
             y = self._note_to_y(note)
             self.pickups.append([x, y, note, False])
 
@@ -422,9 +435,16 @@ class Level:
                 self.drum_lanes.append([x, lane, note, False])
 
     def _note_to_y(self, note):
-        # Map MIDI note 30-80 to play area
-        frac = max(0, min(1, (note - 30) / 50.0))
-        return int(self.play_bottom - frac * self.play_range)
+        # Map MIDI notes to a compressed center band (not full screen)
+        # Use the actual note range in this level, not fixed 30-80
+        if not hasattr(self, '_note_min'):
+            self._note_min = 30
+            self._note_max = 80
+        frac = max(0, min(1, (note - self._note_min) / max(1, self._note_max - self._note_min)))
+        # Compress to middle 60% of play area (more reachable)
+        margin = self.play_range * 0.2
+        usable = self.play_range - margin * 2
+        return int(self.play_bottom - margin - frac * usable)
 
     def _drum_to_lane(self, note):
         for lane_idx, (drum_note, name, color) in FE_DRUM_MAP.items():
@@ -640,6 +660,8 @@ class MoonwolfLayers:
         self.star_fill_bonus = 1.0
         self.combo_shield = False
         self.combo_shield_used = False
+        self._next_note_y = None
+        self._next_note_dist = 0
         self.combo_pulse = 0.0  # Visual pulse when combo increases (0..1 decays)
 
     def _scan_midi_ports(self):
@@ -1410,11 +1432,35 @@ class MoonwolfLayers:
         if is_melody_level:
             play_top = self.level.play_top
             play_bottom = self.level.play_bottom
-            thrust = 800.0   # px/s^2 acceleration
-            drag = 3.0        # velocity decay multiplier
-            max_vel = 350.0
+            thrust = 1200.0   # px/s^2 acceleration (faster for reachability)
+            drag = 4.0        # velocity decay (snappier response)
+            max_vel = 500.0   # higher top speed
 
-            # Apply thrust from input
+            # Note magnetism — find next uncollected note and pull toward it
+            player_x = self.camera_x + 200
+            magnet_strength = 200.0  # pull force
+            best_dist = 99999
+            next_note_y = None
+            for pickup in self.level.pickups:
+                if pickup[3]:  # collected
+                    continue
+                px, py, note, _ = pickup
+                ahead = px - player_x
+                if -30 < ahead < 400:  # upcoming notes within view
+                    if ahead < best_dist:
+                        best_dist = ahead
+                        next_note_y = py
+            # Store for guide line drawing
+            self._next_note_y = next_note_y
+            self._next_note_dist = best_dist if next_note_y else 0
+
+            if next_note_y is not None:
+                # Gentle pull toward next note (stronger when closer)
+                closeness = max(0, 1.0 - best_dist / 400.0)  # 1.0 when right on it, 0 when 400px away
+                diff = next_note_y - self.p1_y
+                self.p1_vy += diff * magnet_strength * closeness * dt
+
+            # Apply thrust from joystick input (overrides magnetism when active)
             self.p1_vy += joy_y * thrust * dt
 
             # Drag — always pulls velocity toward zero
@@ -1443,7 +1489,7 @@ class MoonwolfLayers:
             dx = abs(player_x - px)
             dy = abs(self.p1_y - py)
 
-            if player_x >= px - 10 and dx < actual_speed * dt + 50 and dy < 40:
+            if player_x >= px - 10 and dx < actual_speed * dt + 60 and dy < 55:
                 pickup[3] = True
                 self.note_on(note, 100, self.p1_midi_ch)
                 self.pending_offs.append((note, self.p1_midi_ch, time.time() + 0.25))
@@ -1649,8 +1695,26 @@ class MoonwolfLayers:
             pygame.draw.circle(glow, (255, 255, 255), (16, 16), 3)
             self.screen.blit(glow, (screen_x - 16, bob_y - 16))
 
-        # P1 ship sprite — only on melody levels (not drums-only)
+        # Guide line to next uncollected note
         is_melody_level = len(self.level.pickups) > 0
+        if is_melody_level and hasattr(self, '_next_note_y') and self._next_note_y is not None:
+            p1_sy = int(self.p1_y) + sy_off
+            target_y = int(self._next_note_y) + sy_off
+            # Dashed guide line from ship to next note
+            dist = self._next_note_dist
+            alpha = max(20, min(80, int((1.0 - dist / 400.0) * 80)))
+            guide_color = C_STAR_GOLD if self.star_power else (0, 150, 200)
+            # Draw dots along the path
+            steps = max(2, int(abs(target_y - p1_sy) / 8))
+            for i in range(0, steps, 2):  # Dashed
+                frac = i / max(1, steps)
+                gy = int(p1_sy + (target_y - p1_sy) * frac)
+                gx = 200 + int(frac * min(100, dist * 0.3)) + sx_off
+                dot = pygame.Surface((3, 3), pygame.SRCALPHA)
+                dot.fill((*guide_color, alpha))
+                self.screen.blit(dot, (gx, gy))
+
+        # P1 ship sprite — only on melody levels (not drums-only)
         if is_melody_level:
             p1_screen_x = 200 + sx_off
             p1_y = int(self.p1_y) + sy_off
