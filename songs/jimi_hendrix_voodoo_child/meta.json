@@ -1,0 +1,13 @@
+{
+  "title": "Voodoo Child (Slight Return)",
+  "artist": "Jimi Hendrix",
+  "bpm": 88,
+  "key": "Eb",
+  "bars": 16,
+  "difficulty": 5,
+  "instruments": [
+    "drums",
+    "guitar",
+    "bass"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "title": "Back in Black",
+  "artist": "AC/DC",
+  "bpm": 92,
+  "key": "E",
+  "bars": 16,
+  "difficulty": 3,
+  "instruments": [
+    "drums",
+    "guitar",
+    "bass"
+  ]
+}

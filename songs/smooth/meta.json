@@ -1,0 +1,13 @@
+{
+  "title": "Smooth",
+  "artist": "Santana",
+  "bpm": 116,
+  "key": "Am",
+  "bars": 16,
+  "difficulty": 3,
+  "instruments": [
+    "drums",
+    "guitar",
+    "bass"
+  ]
+}

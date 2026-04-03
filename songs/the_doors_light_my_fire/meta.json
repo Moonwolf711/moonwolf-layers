@@ -1,0 +1,13 @@
+{
+  "title": "Light My Fire",
+  "artist": "The Doors",
+  "bpm": 130,
+  "key": "Am/G",
+  "bars": 16,
+  "difficulty": 4,
+  "instruments": [
+    "drums",
+    "keys",
+    "bass"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "title": "Highway to Hell",
+  "artist": "AC/DC",
+  "bpm": 116,
+  "key": "A",
+  "bars": 16,
+  "difficulty": 3,
+  "instruments": [
+    "drums",
+    "guitar",
+    "bass"
+  ]
+}

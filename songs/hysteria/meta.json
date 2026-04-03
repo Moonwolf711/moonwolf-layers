@@ -1,0 +1,13 @@
+{
+  "title": "Hysteria",
+  "artist": "Muse",
+  "bpm": 94,
+  "key": "Am",
+  "bars": 16,
+  "difficulty": 5,
+  "instruments": [
+    "drums",
+    "bass",
+    "guitar"
+  ]
+}

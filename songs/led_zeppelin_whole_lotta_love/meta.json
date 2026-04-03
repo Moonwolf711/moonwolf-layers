@@ -1,0 +1,13 @@
+{
+  "title": "Whole Lotta Love",
+  "artist": "Led Zeppelin",
+  "bpm": 90,
+  "key": "E",
+  "bars": 16,
+  "difficulty": 3,
+  "instruments": [
+    "drums",
+    "bass",
+    "guitar"
+  ]
+}

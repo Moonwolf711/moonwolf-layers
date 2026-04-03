@@ -1,0 +1,13 @@
+{
+  "title": "Purple Haze",
+  "artist": "Jimi Hendrix",
+  "bpm": 108,
+  "key": "E",
+  "bars": 16,
+  "difficulty": 4,
+  "instruments": [
+    "drums",
+    "guitar",
+    "bass"
+  ]
+}

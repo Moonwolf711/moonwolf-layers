@@ -1,0 +1,13 @@
+{
+  "title": "Black Magic Woman",
+  "artist": "Santana",
+  "bpm": 124,
+  "key": "Dm",
+  "bars": 16,
+  "difficulty": 3,
+  "instruments": [
+    "drums",
+    "guitar",
+    "bass"
+  ]
+}

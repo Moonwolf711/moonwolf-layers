@@ -1,0 +1,13 @@
+{
+  "title": "Kashmir",
+  "artist": "Led Zeppelin",
+  "bpm": 80,
+  "key": "D",
+  "bars": 16,
+  "difficulty": 4,
+  "instruments": [
+    "drums",
+    "strings",
+    "guitar"
+  ]
+}

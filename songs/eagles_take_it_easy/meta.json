@@ -1,0 +1,13 @@
+{
+  "title": "Take It Easy",
+  "artist": "Eagles",
+  "bpm": 138,
+  "key": "G",
+  "bars": 16,
+  "difficulty": 2,
+  "instruments": [
+    "drums",
+    "guitar",
+    "bass"
+  ]
+}

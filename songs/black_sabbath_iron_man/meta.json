@@ -1,0 +1,13 @@
+{
+  "title": "Iron Man",
+  "artist": "Black Sabbath",
+  "bpm": 76,
+  "key": "Bm",
+  "bars": 16,
+  "difficulty": 3,
+  "instruments": [
+    "drums",
+    "guitar",
+    "bass"
+  ]
+}

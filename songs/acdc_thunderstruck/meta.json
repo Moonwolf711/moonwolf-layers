@@ -1,0 +1,13 @@
+{
+  "title": "Thunderstruck",
+  "artist": "AC/DC",
+  "bpm": 134,
+  "key": "B",
+  "bars": 16,
+  "difficulty": 4,
+  "instruments": [
+    "drums",
+    "guitar",
+    "bass"
+  ]
+}

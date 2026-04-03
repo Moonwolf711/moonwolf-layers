@@ -1,0 +1,13 @@
+{
+  "title": "Riders on the Storm",
+  "artist": "The Doors",
+  "bpm": 108,
+  "key": "Em",
+  "bars": 16,
+  "difficulty": 3,
+  "instruments": [
+    "drums",
+    "keys",
+    "bass"
+  ]
+}

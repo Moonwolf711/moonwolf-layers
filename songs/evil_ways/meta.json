@@ -1,0 +1,13 @@
+{
+  "title": "Evil Ways",
+  "artist": "Santana",
+  "bpm": 124,
+  "key": "Gm",
+  "bars": 16,
+  "difficulty": 2,
+  "instruments": [
+    "drums",
+    "keys",
+    "bass"
+  ]
+}

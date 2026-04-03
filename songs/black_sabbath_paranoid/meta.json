@@ -1,0 +1,13 @@
+{
+  "title": "Paranoid",
+  "artist": "Black Sabbath",
+  "bpm": 164,
+  "key": "Em",
+  "bars": 16,
+  "difficulty": 3,
+  "instruments": [
+    "drums",
+    "guitar",
+    "bass"
+  ]
+}

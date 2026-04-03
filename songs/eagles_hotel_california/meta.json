@@ -1,0 +1,13 @@
+{
+  "title": "Hotel California",
+  "artist": "Eagles",
+  "bpm": 74,
+  "key": "Bm",
+  "bars": 16,
+  "difficulty": 4,
+  "instruments": [
+    "drums",
+    "guitar",
+    "bass"
+  ]
+}
