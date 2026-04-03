@@ -554,14 +554,110 @@ def draw_skyline(screen, buildings, cam_x, ground_y, beat_flash=0.0):
 
 
 # ======================== ABLETON TRANSPORT CONTROL ========================
-# These CCs are sent to control Ableton. MIDI-learn them in Ableton:
-#   CC 117 -> Session Record button (or Arrangement Record)
-#   CC 118 -> Stop button
-#   CC 119 -> Play button
-# In Ableton: Preferences > Record > Record Quantization = 1/16 for auto-quantize
+# MIDI CCs — for triggering notes/samples through LoopBe
 TRANSPORT_CC_PLAY = 119
 TRANSPORT_CC_STOP = 118
 TRANSPORT_CC_RECORD = 117
+
+# ======================== ABLETON OSC CONTROL ========================
+# AbletonOSC on port 11000 — transport, BPM, recording, looping
+import struct
+import socket
+
+ABLETON_OSC_HOST = "127.0.0.1"
+ABLETON_OSC_PORT = 11000
+
+def _osc_encode(address, *args):
+    """Encode a simple OSC message (supports int, float, string)."""
+    # Pad address to 4-byte boundary
+    addr = address.encode('utf-8') + b'\x00'
+    while len(addr) % 4 != 0:
+        addr += b'\x00'
+    # Type tag
+    tags = ','
+    data = b''
+    for a in args:
+        if isinstance(a, int):
+            tags += 'i'
+            data += struct.pack('>i', a)
+        elif isinstance(a, float):
+            tags += 'f'
+            data += struct.pack('>f', a)
+        elif isinstance(a, str):
+            tags += 's'
+            s = a.encode('utf-8') + b'\x00'
+            while len(s) % 4 != 0:
+                s += b'\x00'
+            data += s
+    tags_b = tags.encode('utf-8') + b'\x00'
+    while len(tags_b) % 4 != 0:
+        tags_b += b'\x00'
+    return addr + tags_b + data
+
+class AbletonOSC:
+    """Send OSC commands to Ableton Live via AbletonOSC Remote Script."""
+    def __init__(self, host=ABLETON_OSC_HOST, port=ABLETON_OSC_PORT):
+        self.host = host
+        self.port = port
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.connected = False
+        try:
+            self.sock.settimeout(0.1)
+            self.connected = True
+            print(f"  AbletonOSC: ready on {host}:{port}")
+        except Exception as e:
+            print(f"  AbletonOSC error: {e}")
+
+    def send(self, address, *args):
+        if not self.connected:
+            return
+        try:
+            msg = _osc_encode(address, *args)
+            self.sock.sendto(msg, (self.host, self.port))
+        except Exception as e:
+            print(f"  OSC send error: {e}")
+
+    def set_tempo(self, bpm):
+        self.send('/live/song/set/tempo', float(bpm))
+
+    def play(self):
+        self.send('/live/song/start_playing')
+
+    def stop(self):
+        self.send('/live/song/stop_playing')
+
+    def record(self):
+        """Toggle session record."""
+        self.send('/live/song/set/session_record', 1)
+
+    def stop_record(self):
+        self.send('/live/song/set/session_record', 0)
+
+    def set_loop(self, enabled=True):
+        self.send('/live/song/set/loop', 1 if enabled else 0)
+
+    def set_loop_start(self, beats):
+        self.send('/live/song/set/loop_start', float(beats))
+
+    def set_loop_length(self, beats):
+        self.send('/live/song/set/loop_length', float(beats))
+
+    def fire_clip(self, track, clip):
+        """Fire a clip in session view."""
+        self.send('/live/clip/fire', track, clip)
+
+    def stop_track(self, track):
+        self.send('/live/track/stop', track)
+
+    def arm_track(self, track, armed=True):
+        self.send('/live/track/set/arm', track, 1 if armed else 0)
+
+    def set_track_input_channel(self, track, channel):
+        """Set MIDI input routing channel for a track."""
+        self.send('/live/track/set/input_routing_channel', track, channel)
+
+    def close(self):
+        self.sock.close()
 
 
 # ======================== LEVEL LOADER ========================
@@ -804,8 +900,11 @@ class MoonwolfLayers:
                 self.menu_midi_idx = i
                 break
 
-        # MIDI
+        # MIDI (notes/samples go through LoopBe)
         self.midi_port = None
+
+        # OSC (transport control goes through AbletonOSC)
+        self.osc = AbletonOSC()
 
         # Joystick
         self.joystick = None
@@ -969,6 +1068,11 @@ class MoonwolfLayers:
         self.level = self.levels[0]
         self.scroll_speed = self.level.scroll_speed
         self.beat_interval = 60.0 / self.bpm
+
+        # Sync Ableton BPM via OSC
+        self.osc.set_tempo(self.bpm)
+        self.osc.stop()  # Reset transport
+        print(f"  Ableton BPM set to {self.bpm} via OSC")
 
         # Reset scoring
         self.score = 0
@@ -1733,16 +1837,18 @@ class MoonwolfLayers:
         self.loop_playback_head = 0.0  # Sync looper with level start
         self.p1_vy = 0.0               # Reset ship velocity
 
-        # Tell Ableton to start recording
-        self._send_transport(TRANSPORT_CC_PLAY)
-        time.sleep(0.1)
-        self._send_transport(TRANSPORT_CC_RECORD)
+        # Set Ableton BPM to match the song, then start recording via OSC
+        self.osc.set_tempo(self.bpm)
+        time.sleep(0.05)
+        self.osc.play()
+        time.sleep(0.05)
+        self.osc.record()
         self.ableton_recording = True
-        print(f"  Level {self.current_level + 1}: {self.level.name} - GO! (Ableton: RECORD)")
+        print(f"  Level {self.current_level + 1}: {self.level.name} - GO! (Ableton: BPM={self.bpm}, REC via OSC)")
 
     def _next_level(self):
-        # Stop Ableton recording — the clip is now captured and will loop
-        self._send_transport(TRANSPORT_CC_RECORD)  # Toggle record off
+        # Stop Ableton recording via OSC
+        self.osc.stop_record()
         self.ableton_recording = False
         self.locked_levels += 1
         recorded_count = len(self.recorded_layers.get(self.current_level, []))
@@ -1767,7 +1873,8 @@ class MoonwolfLayers:
     def _restart_level(self):
         # Stop Ableton recording if active
         if self.ableton_recording:
-            self._send_transport(TRANSPORT_CC_STOP)
+            self.osc.stop_record()
+            self.osc.stop()
             self.ableton_recording = False
         self.camera_x = -100
         self.combo = 0
@@ -1782,7 +1889,8 @@ class MoonwolfLayers:
         self.beat_interval = 60.0 / self.bpm
         self.scroll_speed = (self.bpm * 4 / 60.0) * (TILE * 2)
         self.level.scroll_speed = self.scroll_speed
-        print(f"  BPM: {self.bpm}")
+        self.osc.set_tempo(self.bpm)  # Sync Ableton BPM
+        print(f"  BPM: {self.bpm} (Ableton synced)")
 
     def _update(self, dt):
         self.state_timer += dt
@@ -1935,9 +2043,9 @@ class MoonwolfLayers:
         # Level complete?
         if self.camera_x > self.level.level_width + 200:
             self.state = "LEVEL_COMPLETE"
-            # Stop Ableton recording — clip captured
+            # Stop Ableton recording via OSC — clip captured
             if self.ableton_recording:
-                self._send_transport(TRANSPORT_CC_RECORD)  # Toggle record off
+                self.osc.stop_record()
                 self.ableton_recording = False
             print(f"  Level complete! Hits: {self.hits}/{self.total_targets} | Max combo: {self.max_combo}")
 
@@ -2735,9 +2843,11 @@ class MoonwolfLayers:
         self.screen.blit(hint, (cx - hint.get_width()//2, HEIGHT - 40))
 
     def _cleanup(self):
-        # Stop Ableton if recording
+        # Stop Ableton via OSC
         if self.ableton_recording:
-            self._send_transport(TRANSPORT_CC_STOP)
+            self.osc.stop_record()
+        self.osc.stop()
+        self.osc.close()
         if self.midi_port:
             for ch in range(16):
                 self.midi_port.send(mido.Message('control_change', control=123, value=0, channel=ch))
