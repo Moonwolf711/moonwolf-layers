@@ -5,6 +5,8 @@ Uses mido library. Each song gets its own folder with per-instrument .mid files 
 
 V2: Full song structures (intro/verse/chorus/bridge/solo/outro), dynamic velocity,
     signature moments, proper note_off messages.
+V3: Humanization pass — swing, timing jitter, velocity jitter, ghost notes, pitch bends,
+    and per-artist feel (Bonham behind-the-beat, Doors jazz swing, Mitchell looseness).
 """
 
 import os
@@ -40,6 +42,7 @@ TRIPLET_8TH = TPB // 3
 DOT_QUARTER = QUARTER + EIGHTH
 DOT_EIGHTH = EIGHTH + SIXTEENTH
 BAR = WHOLE
+THIRTYSECOND = TPB // 8
 
 
 def ticks_per_beat():
@@ -86,6 +89,329 @@ def humanize(vel, spread=6):
 def h(vel, spread=6):
     """Shorthand for humanize."""
     return humanize(vel, spread)
+
+
+# ============================================================
+# HUMANIZATION ENGINE (V3)
+# ============================================================
+
+def humanize_track(track, style_params):
+    """Post-process an entire track to add human feel.
+
+    style_params dict keys:
+        swing_amount: 0.0-0.3  (push offbeat 8th notes later for shuffle)
+        timing_jitter: int     (random tick offset +/- N)
+        vel_jitter: int        (random velocity offset +/- N)
+        late_offset: int       (constant tick delay for behind-the-beat feel)
+        early_offset: int      (constant tick advance for rushing)
+        vel_scale: float       (multiply all velocities, e.g. 0.8 for brushes)
+        phrase_accent: bool    (if True, first note of each phrase gets +10 vel)
+        drum_channel: int|None (if set, apply drum-specific logic)
+        kick_late: int         (extra late offset for kick drum only)
+        snare_late: int        (extra late offset for snare only)
+        crash_early: int       (ticks to pull crash hits earlier)
+        add_pitch_bends: bool  (add slight pitch bend on melody notes)
+    """
+    swing = style_params.get('swing_amount', 0.0)
+    jitter = style_params.get('timing_jitter', 10)
+    vel_jit = style_params.get('vel_jitter', 8)
+    late = style_params.get('late_offset', 0)
+    early = style_params.get('early_offset', 0)
+    vel_scale = style_params.get('vel_scale', 1.0)
+    drum_ch = style_params.get('drum_channel', None)
+    kick_late = style_params.get('kick_late', 0)
+    snare_late = style_params.get('snare_late', 0)
+    crash_early = style_params.get('crash_early', 0)
+    add_bends = style_params.get('add_pitch_bends', False)
+
+    # Build absolute-time event list from track
+    abs_events = []
+    abs_tick = 0
+    for msg in track:
+        abs_tick += msg.time
+        abs_events.append((abs_tick, msg))
+
+    new_events = []
+    phrase_start = True  # Track phrase boundaries for accent
+
+    for i, (tick, msg) in enumerate(abs_events):
+        if isinstance(msg, MetaMessage):
+            new_events.append((tick, msg))
+            continue
+
+        new_tick = tick
+        new_msg = msg.copy()
+
+        if msg.type == 'note_on' and msg.velocity > 0:
+            note = msg.note
+            vel = msg.velocity
+            ch = msg.channel
+
+            # --- Velocity scaling ---
+            vel = int(vel * vel_scale)
+
+            # --- Velocity jitter ---
+            vel += random.randint(-vel_jit, vel_jit)
+            vel = max(30, min(127, vel))
+
+            # --- Phrase accent (first note after rest) ---
+            if style_params.get('phrase_accent', False) and phrase_start:
+                vel = min(127, vel + 10)
+                phrase_start = False
+
+            # --- Swing: push offbeat 8th notes ---
+            if swing > 0:
+                pos_in_beat = tick % TPB
+                half_beat = TPB // 2
+                # If note lands on the offbeat 8th (around half_beat)
+                if abs(pos_in_beat - half_beat) < (TPB // 8):
+                    new_tick += int(swing * half_beat)
+
+            # --- Drum-specific timing ---
+            if drum_ch is not None and ch == drum_ch:
+                if note == KICK and kick_late > 0:
+                    new_tick += random.randint(kick_late // 2, kick_late)
+                elif note == SNARE and snare_late > 0:
+                    new_tick += random.randint(snare_late // 2, snare_late)
+                elif note == CRASH and crash_early > 0:
+                    new_tick -= random.randint(crash_early // 2, crash_early)
+
+            # --- General timing: late/early offset ---
+            new_tick += late
+            new_tick -= early
+
+            # --- Random timing jitter ---
+            new_tick += random.randint(-jitter, jitter)
+            new_tick = max(0, new_tick)
+
+            new_msg = Message(msg.type, note=note, velocity=vel,
+                              time=0, channel=ch)
+
+            # --- Pitch bend for melody instruments ---
+            if add_bends and ch != 9 and drum_ch != ch:
+                # ~10% chance of a slight pitch bend approach
+                if random.random() < 0.10:
+                    # Insert a slight-flat bend 30 ticks before, resolve on the note
+                    bend_tick = max(0, new_tick - 30)
+                    bend_msg = Message('pitchwheel', pitch=-random.randint(200, 600),
+                                       time=0, channel=ch)
+                    resolve_msg = Message('pitchwheel', pitch=0, time=0, channel=ch)
+                    new_events.append((bend_tick, bend_msg))
+                    new_events.append((new_tick + 25, resolve_msg))
+
+        elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
+            # Note-off inherits the same jitter direction as its note-on
+            new_tick += late - early + random.randint(-jitter // 2, jitter // 2)
+            new_tick = max(0, new_tick)
+
+            # Check if this might be a rest boundary (phrase accent tracking)
+            if msg.note == 0:
+                phrase_start = True
+
+        new_events.append((new_tick, new_msg))
+
+    # Sort by absolute tick, then convert back to delta times
+    new_events.sort(key=lambda x: x[0])
+
+    new_track = MidiTrack()
+    prev_tick = 0
+    for abs_t, msg in new_events:
+        delta = max(0, abs_t - prev_tick)
+        if isinstance(msg, MetaMessage):
+            new_track.append(msg.copy(time=delta))
+        else:
+            new_track.append(msg.copy(time=delta))
+        prev_tick = abs_t
+
+    return new_track
+
+
+def add_ghost_notes(track, style_params):
+    """Insert ghost notes into a drum track for human feel.
+
+    style_params dict keys:
+        ghost_snare_vel: (min, max) velocity range for ghost snares
+        ghost_hat_vel: (min, max) velocity range for ghost hats
+        ghost_density: float 0-1, probability of ghost note between main hits
+        flam_before_crash: bool, add 32nd-note snare flam before crashes
+        drum_channel: int
+    """
+    ghost_snare_vel = style_params.get('ghost_snare_vel', (25, 40))
+    ghost_hat_vel = style_params.get('ghost_hat_vel', (20, 35))
+    density = style_params.get('ghost_density', 0.4)
+    flam = style_params.get('flam_before_crash', True)
+    ch = style_params.get('drum_channel', 9)
+
+    # Convert to absolute time
+    abs_events = []
+    abs_tick = 0
+    for msg in track:
+        abs_tick += msg.time
+        abs_events.append((abs_tick, msg))
+
+    # Find main hit positions
+    kick_ticks = []
+    snare_ticks = []
+    hat_ticks = []
+    crash_ticks = []
+
+    for tick, msg in abs_events:
+        if isinstance(msg, MetaMessage):
+            continue
+        if msg.type == 'note_on' and msg.velocity > 0 and msg.channel == ch:
+            if msg.note == KICK:
+                kick_ticks.append(tick)
+            elif msg.note == SNARE:
+                snare_ticks.append(tick)
+            elif msg.note in (HAT_CLOSED, HAT_OPEN, HAT_PEDAL, RIDE, RIDE_BELL):
+                hat_ticks.append(tick)
+            elif msg.note == CRASH:
+                crash_ticks.append(tick)
+
+    ghosts_to_add = []
+
+    # Ghost snares between kick-snare patterns
+    all_main = sorted(set(kick_ticks + snare_ticks))
+    for i in range(len(all_main) - 1):
+        gap = all_main[i + 1] - all_main[i]
+        if gap >= EIGHTH:
+            # Add 1-3 ghost snares in the gap
+            num_ghosts = random.randint(1, min(3, int(gap / SIXTEENTH) - 1))
+            for g in range(num_ghosts):
+                if random.random() < density:
+                    offset = random.randint(SIXTEENTH, gap - SIXTEENTH)
+                    ghost_tick = all_main[i] + offset
+                    vel = random.randint(*ghost_snare_vel)
+                    ghosts_to_add.append((ghost_tick, SNARE, vel, SIXTEENTH))
+
+    # Ghost hats between main hat hits
+    if hat_ticks:
+        sorted_hats = sorted(hat_ticks)
+        for i in range(len(sorted_hats) - 1):
+            gap = sorted_hats[i + 1] - sorted_hats[i]
+            if gap >= EIGHTH and random.random() < density * 0.7:
+                ghost_tick = sorted_hats[i] + gap // 2
+                vel = random.randint(*ghost_hat_vel)
+                ghosts_to_add.append((ghost_tick, HAT_CLOSED, vel, SIXTEENTH))
+
+    # Flam before crash hits (32nd-note snare pair)
+    if flam:
+        for ct in crash_ticks:
+            flam_tick = ct - THIRTYSECOND * 2
+            if flam_tick > 0:
+                ghosts_to_add.append((flam_tick, SNARE, random.randint(45, 65), THIRTYSECOND))
+                ghosts_to_add.append((flam_tick + THIRTYSECOND - 10, SNARE,
+                                      random.randint(55, 75), THIRTYSECOND))
+
+    # Merge ghost notes into event list
+    for tick, note, vel, dur in ghosts_to_add:
+        abs_events.append((tick, Message('note_on', note=note, velocity=vel,
+                                          time=0, channel=ch)))
+        abs_events.append((tick + dur, Message('note_off', note=note, velocity=0,
+                                                time=0, channel=ch)))
+
+    # Sort and rebuild
+    abs_events.sort(key=lambda x: x[0])
+    new_track = MidiTrack()
+    prev_tick = 0
+    for abs_t, msg in abs_events:
+        delta = max(0, abs_t - prev_tick)
+        if isinstance(msg, MetaMessage):
+            new_track.append(msg.copy(time=delta))
+        else:
+            new_track.append(msg.copy(time=delta))
+        prev_tick = abs_t
+
+    return new_track
+
+
+# --- Style presets ---
+
+STYLE_BONHAM = {
+    'swing_amount': 0.15,
+    'timing_jitter': 8,
+    'vel_jitter': 10,
+    'late_offset': 0,
+    'drum_channel': 9,
+    'kick_late': 12,       # Bonham plays behind the beat
+    'snare_late': 10,
+    'crash_early': 5,
+    'vel_scale': 1.0,
+    'ghost_snare_vel': (30, 45),
+    'ghost_hat_vel': (20, 35),
+    'ghost_density': 0.5,
+    'flam_before_crash': True,
+}
+
+STYLE_BONHAM_MELODY = {
+    'swing_amount': 0.10,
+    'timing_jitter': 8,
+    'vel_jitter': 6,
+    'late_offset': 0,
+    'phrase_accent': True,
+    'add_pitch_bends': True,
+    'vel_scale': 1.0,
+}
+
+STYLE_DOORS_DRUMS = {
+    'swing_amount': 0.20,
+    'timing_jitter': 6,
+    'vel_jitter': 8,
+    'late_offset': 0,
+    'drum_channel': 9,
+    'kick_late': 0,
+    'snare_late': 0,
+    'crash_early': 0,
+    'vel_scale': 0.85,     # Brushes feel — lower overall velocity
+    'ghost_snare_vel': (25, 40),
+    'ghost_hat_vel': (18, 30),
+    'ghost_density': 0.35,
+    'flam_before_crash': True,
+}
+
+STYLE_DOORS_MELODY = {
+    'swing_amount': 0.15,
+    'timing_jitter': 6,
+    'vel_jitter': 5,
+    'late_offset': 0,
+    'phrase_accent': True,
+    'add_pitch_bends': True,
+    'vel_scale': 0.90,     # Slightly softer jazz feel
+}
+
+STYLE_HENDRIX_DRUMS = {
+    'swing_amount': 0.20,
+    'timing_jitter': 10,
+    'vel_jitter': 12,
+    'late_offset': 0,
+    'drum_channel': 9,
+    'kick_late': 8,        # Mitch Mitchell slightly behind on kick
+    'snare_late': 0,
+    'crash_early': 5,      # Crash accents slightly early
+    'vel_scale': 1.0,
+    'ghost_snare_vel': (25, 42),
+    'ghost_hat_vel': (20, 35),
+    'ghost_density': 0.55, # Ghost snares everywhere
+    'flam_before_crash': True,
+}
+
+STYLE_HENDRIX_MELODY = {
+    'swing_amount': 0.12,
+    'timing_jitter': 8,
+    'vel_jitter': 8,
+    'late_offset': 0,
+    'phrase_accent': True,
+    'add_pitch_bends': True,
+    'vel_scale': 1.0,
+}
+
+
+def apply_humanization(track, style, is_drum=False):
+    """Apply full humanization pipeline to a track."""
+    result = humanize_track(track, style)
+    if is_drum:
+        result = add_ghost_notes(result, style)
+    return result
 
 
 def make_track(name, tempo_bpm):
@@ -377,6 +703,11 @@ def generate_whole_lotta_love():
 
     guitar_track.append(MetaMessage('end_of_track', time=0))
 
+    # --- Humanization pass (Bonham: behind the beat, heavy ghost notes) ---
+    drum_track = apply_humanization(drum_track, STYLE_BONHAM, is_drum=True)
+    bass_track = apply_humanization(bass_track, STYLE_BONHAM_MELODY)
+    guitar_track = apply_humanization(guitar_track, STYLE_BONHAM_MELODY)
+
     # Save
     save_single_track(drum_track, bpm, os.path.join(folder, "drums.mid"))
     save_single_track(bass_track, bpm, os.path.join(folder, "bass.mid"))
@@ -570,6 +901,11 @@ def generate_kashmir():
 
     guitar_track.append(MetaMessage('end_of_track', time=0))
 
+    # --- Humanization pass (Bonham: behind the beat, march feel) ---
+    drum_track = apply_humanization(drum_track, STYLE_BONHAM, is_drum=True)
+    strings_track = apply_humanization(strings_track, STYLE_BONHAM_MELODY)
+    guitar_track = apply_humanization(guitar_track, STYLE_BONHAM_MELODY)
+
     # Save
     save_single_track(drum_track, bpm, os.path.join(folder, "drums.mid"))
     save_single_track(strings_track, bpm, os.path.join(folder, "strings.mid"))
@@ -751,6 +1087,11 @@ def generate_riders_on_the_storm():
             add_note(bass_track, E2, WHOLE, velocity=h(vel), channel=ch_bass)
 
     bass_track.append(MetaMessage('end_of_track', time=0))
+
+    # --- Humanization pass (Doors: jazz swing, brushes, laid back) ---
+    drum_track = apply_humanization(drum_track, STYLE_DOORS_DRUMS, is_drum=True)
+    keys_track = apply_humanization(keys_track, STYLE_DOORS_MELODY)
+    bass_track = apply_humanization(bass_track, STYLE_DOORS_MELODY)
 
     # Save
     save_single_track(drum_track, bpm, os.path.join(folder, "drums.mid"))
@@ -963,6 +1304,14 @@ def generate_light_my_fire():
             add_note(bass_track, A2, WHOLE, velocity=h(vel), channel=ch_bass)
 
     bass_track.append(MetaMessage('end_of_track', time=0))
+
+    # --- Humanization pass (Doors: jazz swing, brushes, fills rush slightly) ---
+    # Light My Fire has slightly more energy in fills — use a modified style
+    doors_lmf_drums = dict(STYLE_DOORS_DRUMS)
+    doors_lmf_drums['early_offset'] = 3  # Slight rushing tendency on fills
+    drum_track = apply_humanization(drum_track, doors_lmf_drums, is_drum=True)
+    keys_track = apply_humanization(keys_track, STYLE_DOORS_MELODY)
+    bass_track = apply_humanization(bass_track, STYLE_DOORS_MELODY)
 
     # Save
     save_single_track(drum_track, bpm, os.path.join(folder, "drums.mid"))
@@ -1190,6 +1539,11 @@ def generate_purple_haze():
             add_note(bass_track, E2, WHOLE, velocity=h(95), channel=ch_bass)
 
     bass_track.append(MetaMessage('end_of_track', time=0))
+
+    # --- Humanization pass (Hendrix: Mitchell jazzy+loose, ghost snares everywhere) ---
+    drum_track = apply_humanization(drum_track, STYLE_HENDRIX_DRUMS, is_drum=True)
+    guitar_track = apply_humanization(guitar_track, STYLE_HENDRIX_MELODY)
+    bass_track = apply_humanization(bass_track, STYLE_HENDRIX_MELODY)
 
     # Save
     save_single_track(drum_track, bpm, os.path.join(folder, "drums.mid"))
@@ -1437,6 +1791,11 @@ def generate_voodoo_child():
 
     bass_track.append(MetaMessage('end_of_track', time=0))
 
+    # --- Humanization pass (Hendrix: Mitchell jazzy+loose, ghost snares everywhere) ---
+    drum_track = apply_humanization(drum_track, STYLE_HENDRIX_DRUMS, is_drum=True)
+    guitar_track = apply_humanization(guitar_track, STYLE_HENDRIX_MELODY)
+    bass_track = apply_humanization(bass_track, STYLE_HENDRIX_MELODY)
+
     # Save
     save_single_track(drum_track, bpm, os.path.join(folder, "drums.mid"))
     save_single_track(guitar_track, bpm, os.path.join(folder, "guitar.mid"))
@@ -1452,7 +1811,7 @@ def generate_voodoo_child():
 # MAIN
 # ============================================================
 def main():
-    print("Generating Group 1 MIDI files (V2 - full song structures)...")
+    print("Generating Group 1 MIDI files (V3 - humanized with swing, ghost notes, feel)...")
     print(f"Output directory: {BASE_DIR}")
     print()
 

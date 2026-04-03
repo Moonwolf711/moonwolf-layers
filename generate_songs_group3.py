@@ -17,24 +17,24 @@ from mido import MidiFile, MidiTrack, Message, MetaMessage
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SONGS_DIR = os.path.join(BASE_DIR, "songs")
 
-# GM Drum Map
+# Lycra Kit Drum Map
 KICK = 36
 SNARE = 38
 SIDE_STICK = 37
 CLOSED_HAT = 42
 OPEN_HAT = 46
-RIDE = 51
-RIDE_BELL = 53
-CRASH = 49
-HIGH_TOM = 50
-MID_TOM = 47
-LOW_TOM = 45
-CONGA_HIGH = 62
-CONGA_LOW = 63
-CONGA_MUTE = 64
-COWBELL = 56
-TIMBALE_HIGH = 65
-TIMBALE_LOW = 66
+RIDE = 44         # Shaker in Lycra Kit
+RIDE_BELL = 44    # Shaker (Lycra Kit has no separate ride bell)
+CRASH = 39        # Clap Lycra
+HIGH_TOM = 47     # Tom 909 Mid 3
+MID_TOM = 41      # Tom Mid 1
+LOW_TOM = 41      # Tom Mid 1 (Lycra Kit)
+CONGA_HIGH = 47   # Tom 909 Mid 3 (mapped for Lycra)
+CONGA_LOW = 41    # Tom Mid 1 (mapped for Lycra)
+CONGA_MUTE = 42   # Closed Hat (ghost layer for Lycra)
+COWBELL = 44      # Shaker (Lycra Kit)
+TIMBALE_HIGH = 47 # Tom 909 Mid 3 (Lycra)
+TIMBALE_LOW = 41  # Tom Mid 1 (Lycra)
 
 # Channel constants
 CH_KEYS = 0
@@ -100,6 +100,270 @@ def make_template(bpm):
     mid = MidiFile(ticks_per_beat=480)
     mid._bpm = bpm
     return mid
+
+
+import random
+
+
+def humanize_events(events, swing=0.0, timing_jitter=0, velocity_jitter=0,
+                    ghost_notes=None, flam_before_accents=False,
+                    accent_vel_threshold=100, ppq=480,
+                    crescendo_per_bar=0, bar_length_beats=4,
+                    micro_timing=None, ride_ahead=0):
+    """
+    Apply humanization to a list of note events in-place.
+
+    Args:
+        events: list of ('on'/'off', abs_tick, note, vel, channel) tuples
+        swing: float 0.0-0.5, pushes even 8th notes later (swing feel)
+        timing_jitter: int, max random +/- tick offset
+        velocity_jitter: int, max random +/- velocity offset
+        ghost_notes: list of dicts, each: {'note': N, 'vel_range': (lo,hi), 'every_n_ticks': T, 'channel': C}
+        flam_before_accents: if True, add a flam (2nd note 8 ticks before) accent hits
+        accent_vel_threshold: velocity above which a note counts as accented
+        ppq: ticks per quarter note
+        crescendo_per_bar: int, velocity added per bar (for gradual builds)
+        bar_length_beats: beats per bar (4 for 4/4, 3 for 6/8)
+        micro_timing: dict of {note_number: {'jitter': int, 'accent_beats': [0,2], 'accent_boost': int,
+                       'soften_offbeats': int}}  — per-note micro-timing rules
+        ride_ahead: int, ticks to push ride/bell notes ahead of beat (negative = ahead)
+    Returns:
+        The modified events list (also modified in place)
+    """
+    bar_ticks = ppq * bar_length_beats
+    new_events = []
+    flams_to_add = []
+
+    for i, ev in enumerate(events):
+        kind, abs_tick, note, vel, ch = ev
+
+        # Only process note-on for timing/vel changes; note-off follows
+        if kind == 'on':
+            # --- Swing: push even 8th notes (off-beats) ---
+            if swing > 0:
+                eighth = ppq // 2
+                pos_in_beat = abs_tick % ppq
+                # If this note falls on the "and" (second 8th of a beat)
+                if eighth - 5 <= pos_in_beat <= eighth + 5:
+                    swing_offset = int(ppq * swing)
+                    abs_tick += swing_offset
+
+            # --- Ride ahead-of-beat ---
+            if ride_ahead != 0 and note in (RIDE, RIDE_BELL, 44):
+                abs_tick += ride_ahead
+
+            # --- Micro-timing per note ---
+            if micro_timing and note in micro_timing:
+                mt = micro_timing[note]
+                mt_jitter = mt.get('jitter', 0)
+                if mt_jitter > 0:
+                    abs_tick += random.randint(-mt_jitter, mt_jitter)
+                # Accent boost on certain beats
+                accent_beats = mt.get('accent_beats', [])
+                if accent_beats:
+                    beat_in_bar = (abs_tick % bar_ticks) / ppq
+                    for ab in accent_beats:
+                        if abs(beat_in_bar - ab) < 0.1:
+                            vel = min(127, vel + mt.get('accent_boost', 10))
+                            break
+                # Soften off-beats
+                soften = mt.get('soften_offbeats', 0)
+                if soften > 0:
+                    beat_in_bar = (abs_tick % bar_ticks) / ppq
+                    beat_frac = beat_in_bar - int(beat_in_bar)
+                    if beat_frac > 0.2:  # off-beat
+                        vel = max(1, vel - soften)
+
+            # --- Timing jitter ---
+            if timing_jitter > 0:
+                abs_tick += random.randint(-timing_jitter, timing_jitter)
+
+            # --- Velocity jitter ---
+            if velocity_jitter > 0:
+                vel += random.randint(-velocity_jitter, velocity_jitter)
+
+            # --- Crescendo per bar ---
+            if crescendo_per_bar != 0:
+                bar_num = abs_tick // bar_ticks
+                beat_in_bar = (abs_tick % bar_ticks) / bar_ticks
+                vel += int(crescendo_per_bar * (bar_num + beat_in_bar))
+
+            vel = max(1, min(127, vel))
+            abs_tick = max(0, abs_tick)
+
+            # --- Flam before accents ---
+            if flam_before_accents and vel >= accent_vel_threshold:
+                flam_tick = max(0, abs_tick - 8)
+                flam_vel = max(1, min(127, vel - 25))
+                flams_to_add.append(('on', flam_tick, note, flam_vel, ch))
+                flams_to_add.append(('off', flam_tick + 15, note, 0, ch))
+
+        elif kind == 'off':
+            # Apply same swing/jitter to note-off to keep duration consistent
+            if swing > 0:
+                eighth = ppq // 2
+                pos_in_beat = abs_tick % ppq
+                if eighth - 5 <= pos_in_beat <= eighth + 5:
+                    abs_tick += int(ppq * swing)
+            if timing_jitter > 0:
+                abs_tick += random.randint(-timing_jitter, timing_jitter)
+            if ride_ahead != 0 and note in (RIDE, RIDE_BELL, 44):
+                abs_tick += ride_ahead
+            abs_tick = max(0, abs_tick)
+            vel = 0  # note-off velocity stays 0
+
+        events[i] = (kind, abs_tick, note, vel, ch)
+
+    # --- Add ghost notes ---
+    if ghost_notes:
+        # Determine the range of the events
+        on_ticks = [e[1] for e in events if e[0] == 'on']
+        if on_ticks:
+            start_tick = min(on_ticks)
+            end_tick = max(on_ticks)
+            for gn in ghost_notes:
+                gnote = gn['note']
+                gvel_lo, gvel_hi = gn['vel_range']
+                gstep = gn['every_n_ticks']
+                gch = gn.get('channel', 9)
+                gdur = gn.get('duration', int(ppq * 0.08))
+                pos = start_tick
+                while pos < end_tick:
+                    gvel = random.randint(gvel_lo, gvel_hi)
+                    # Small timing jitter on ghost notes
+                    gjitter = random.randint(-3, 3)
+                    gpos = max(0, pos + gjitter)
+                    new_events.append(('on', gpos, gnote, gvel, gch))
+                    new_events.append(('off', gpos + gdur, gnote, 0, gch))
+                    pos += gstep
+
+    events.extend(flams_to_add)
+    events.extend(new_events)
+    return events
+
+
+def add_ghost_snare_between_backbeats(events, ppq=480, bar_length_beats=4,
+                                       vel=30, channel=9):
+    """Add ghost snare hits between backbeats (beats 2 and 4 in 4/4)."""
+    on_ticks = [e[1] for e in events if e[0] == 'on']
+    if not on_ticks:
+        return events
+    start = min(on_ticks)
+    end = max(on_ticks)
+    bar_ticks = ppq * bar_length_beats
+    new = []
+    bar_start_t = start - (start % bar_ticks)
+    while bar_start_t < end:
+        # Ghost snares at: beat 0.5, 1.5, 2.5, 3.5 (the "e" of each beat)
+        for beat_off in [0.5, 1.5, 2.5, 3.5]:
+            pos = bar_start_t + int(ppq * beat_off)
+            if start <= pos < end:
+                gv = vel + random.randint(-5, 5)
+                gv = max(1, min(127, gv))
+                new.append(('on', pos, SNARE, gv, channel))
+                new.append(('off', pos + int(ppq * 0.08), SNARE, 0, channel))
+        bar_start_t += bar_ticks
+    events.extend(new)
+    return events
+
+
+def add_ghost_kick_16ths(events, ppq=480, bar_length_beats=4, vel=40, channel=9):
+    """Add ghost kick 16ths underneath for driving songs like Hysteria."""
+    on_ticks = [e[1] for e in events if e[0] == 'on']
+    if not on_ticks:
+        return events
+    start = min(on_ticks)
+    end = max(on_ticks)
+    bar_ticks = ppq * bar_length_beats
+    new = []
+    sixteenth = ppq // 4
+    bar_start_t = start - (start % bar_ticks)
+    while bar_start_t < end:
+        for i in range(bar_length_beats * 4):
+            pos = bar_start_t + i * sixteenth
+            if start <= pos < end:
+                # Skip positions where a loud kick already exists
+                gv = vel + random.randint(-8, 8)
+                gv = max(1, min(127, gv))
+                new.append(('on', pos, KICK, gv, channel))
+                new.append(('off', pos + int(ppq * 0.06), KICK, 0, channel))
+        bar_start_t += bar_ticks
+    events.extend(new)
+    return events
+
+
+def add_bass_ghost_notes(events, ppq=480, vel_range=(30, 40), channel=2):
+    """Add ghost bass notes between main notes at low velocity."""
+    on_events = [(e[1], e[2]) for e in events if e[0] == 'on']
+    if len(on_events) < 2:
+        return events
+    on_events.sort()
+    new = []
+    for i in range(len(on_events) - 1):
+        tick1, note1 = on_events[i]
+        tick2, note2 = on_events[i + 1]
+        gap = tick2 - tick1
+        if gap > ppq // 2:  # only if there's enough space
+            mid_tick = tick1 + gap // 2
+            gvel = random.randint(*vel_range)
+            # Use a chromatic passing tone
+            passing = note1 + (1 if note2 > note1 else -1)
+            new.append(('on', mid_tick, passing, gvel, channel))
+            new.append(('off', mid_tick + int(ppq * 0.1), passing, 0, channel))
+    events.extend(new)
+    return events
+
+
+def add_bass_slide(events, ppq=480, channel=2):
+    """Convert some bass intervals into quick chromatic slides (3 notes in 30 ticks)."""
+    on_events = [(i, e) for i, e in enumerate(events) if e[0] == 'on']
+    new = []
+    for idx, (i, ev) in enumerate(on_events):
+        _, abs_tick, note, vel, ch = ev
+        if ch != channel:
+            continue
+        # Find next note-on on same channel
+        for j in range(idx + 1, len(on_events)):
+            _, next_ev = on_events[j]
+            if next_ev[4] == channel:
+                next_note = next_ev[2]
+                interval = next_note - note
+                if abs(interval) >= 3:
+                    # Add chromatic slide before the next note
+                    slide_start = next_ev[1] - 30
+                    if slide_start > abs_tick:
+                        direction = 1 if interval > 0 else -1
+                        for s in range(3):
+                            sn = next_note - direction * (3 - s)
+                            st = slide_start + s * 10
+                            sv = max(1, min(127, vel - 20 + s * 5))
+                            new.append(('on', st, sn, sv, channel))
+                            new.append(('off', st + 8, sn, 0, channel))
+                break
+    events.extend(new)
+    return events
+
+
+def add_guitar_bend(events, ppq=480, channel=1, bend_semitones=1, bend_duration_ticks=100):
+    """Simulate guitar bends by adding a note 1 semitone below that leads into the target.
+    For each long note (>= 1 beat), prepend a grace note from below."""
+    on_events = [(i, e) for i, e in enumerate(events) if e[0] == 'on' and e[4] == channel]
+    new = []
+    for i, ev in on_events:
+        _, abs_tick, note, vel, ch = ev
+        # Find matching note-off to determine duration
+        for e2 in events:
+            if e2[0] == 'off' and e2[2] == note and e2[1] > abs_tick:
+                dur = e2[1] - abs_tick
+                if dur >= ppq:  # only bend on sustained notes
+                    bend_note = note - bend_semitones
+                    bend_start = abs_tick - bend_duration_ticks
+                    if bend_start >= 0 and random.random() < 0.3:  # 30% chance
+                        new.append(('on', bend_start, bend_note, max(1, vel - 15), ch))
+                        new.append(('off', bend_start + bend_duration_ticks - 10, bend_note, 0, ch))
+                break
+    events.extend(new)
+    return events
 
 
 def write_meta(song_dir, title, artist, bpm, key, bars, difficulty, instruments):
@@ -306,6 +570,25 @@ def gen_black_magic_woman():
     guitar_lead_phrase_a(32, 0.9)
     walking_bass_2bar(32, 0.85)
     walking_bass_2bar(34, 0.7)
+
+    # --- Humanization: Santana Latin percussion feel ---
+    random.seed(42)  # reproducible
+    # Drums: heavy swing, ghost 16th hats, flams, conga ghost fills
+    humanize_events(drums, swing=0.22, timing_jitter=8, velocity_jitter=6,
+                    ghost_notes=[
+                        {'note': CLOSED_HAT, 'vel_range': (15, 25), 'every_n_ticks': ppq // 4, 'channel': CH_DRUMS, 'duration': int(ppq * 0.06)},
+                    ],
+                    flam_before_accents=True, accent_vel_threshold=100, ppq=ppq,
+                    bar_length_beats=4, ride_ahead=-5)
+    # Guitar: Santana bends on sustained lead notes
+    humanize_events(guitar, swing=0.12, timing_jitter=6, velocity_jitter=5,
+                    ppq=ppq, bar_length_beats=4)
+    add_guitar_bend(guitar, ppq=ppq, channel=CH_GUITAR, bend_semitones=1, bend_duration_ticks=100)
+    # Bass: ghost notes between main notes, slight swing
+    humanize_events(bass, swing=0.15, timing_jitter=5, velocity_jitter=4,
+                    ppq=ppq, bar_length_beats=4,
+                    micro_timing={38: {'jitter': 4, 'accent_beats': [0, 2], 'accent_boost': 8, 'soften_offbeats': 6}})
+    add_bass_ghost_notes(bass, ppq=ppq, vel_range=(30, 40), channel=CH_BASS)
 
     # Save
     save_track_midi(mid, drums, os.path.join(song_dir, "drums.mid"), "Drums", CH_DRUMS)
@@ -520,6 +803,25 @@ def gen_smooth():
         guitar_chorus_big(b, 1.12)
     smooth_bass_4bar(28, 1.1)
 
+    # --- Humanization: Santana pop-latin, ghost notes, bass slides ---
+    random.seed(43)
+    # Drums: Latin swing, ghost 16th hats underneath everything
+    humanize_events(drums, swing=0.20, timing_jitter=7, velocity_jitter=5,
+                    ghost_notes=[
+                        {'note': CLOSED_HAT, 'vel_range': (15, 25), 'every_n_ticks': ppq // 4, 'channel': CH_DRUMS, 'duration': int(ppq * 0.06)},
+                    ],
+                    flam_before_accents=True, accent_vel_threshold=100, ppq=ppq,
+                    bar_length_beats=4, ride_ahead=-5)
+    # Guitar: light swing, bends on sustained Santana lead
+    humanize_events(guitar, swing=0.10, timing_jitter=6, velocity_jitter=5,
+                    ppq=ppq, bar_length_beats=4)
+    add_guitar_bend(guitar, ppq=ppq, channel=CH_GUITAR, bend_semitones=1, bend_duration_ticks=100)
+    # Bass: ghost notes vel 30-40 between main notes, slides as quick chromatic runs
+    humanize_events(bass, swing=0.12, timing_jitter=5, velocity_jitter=4,
+                    ppq=ppq, bar_length_beats=4)
+    add_bass_ghost_notes(bass, ppq=ppq, vel_range=(30, 40), channel=CH_BASS)
+    add_bass_slide(bass, ppq=ppq, channel=CH_BASS)
+
     # Save
     save_track_midi(mid, drums, os.path.join(song_dir, "drums.mid"), "Drums", CH_DRUMS)
     save_track_midi(mid, guitar, os.path.join(song_dir, "guitar.mid"), "Guitar", CH_GUITAR)
@@ -692,6 +994,23 @@ def gen_evil_ways():
             organ_c7_bar(b, fade * 0.9)
     evil_bass_2bar(28, 0.8)
     evil_bass_2bar(30, 0.65)
+
+    # --- Humanization: Santana Latin shuffle, ghost hats, organ swing ---
+    random.seed(44)
+    # Drums: heavy Latin swing, ghost 16th hat layer, flams
+    humanize_events(drums, swing=0.25, timing_jitter=8, velocity_jitter=6,
+                    ghost_notes=[
+                        {'note': CLOSED_HAT, 'vel_range': (15, 25), 'every_n_ticks': ppq // 4, 'channel': CH_DRUMS, 'duration': int(ppq * 0.06)},
+                    ],
+                    flam_before_accents=True, accent_vel_threshold=100, ppq=ppq,
+                    bar_length_beats=4, ride_ahead=-5)
+    # Keys: light swing for organ comps
+    humanize_events(keys, swing=0.15, timing_jitter=5, velocity_jitter=4,
+                    ppq=ppq, bar_length_beats=4)
+    # Bass: syncopated kick push, ghost notes
+    humanize_events(bass, swing=0.18, timing_jitter=6, velocity_jitter=4,
+                    ppq=ppq, bar_length_beats=4)
+    add_bass_ghost_notes(bass, ppq=ppq, vel_range=(30, 40), channel=CH_BASS)
 
     # Save
     save_track_midi(mid, drums, os.path.join(song_dir, "drums.mid"), "Drums", CH_DRUMS)
@@ -896,6 +1215,34 @@ def gen_hysteria():
     # === OUTRO (bars 32-33): Bass riff alone, stops ===
     hysteria_bass_riff(32, 0.9)
 
+    # --- Humanization: Muse - Dom Howard tight/aggressive ---
+    random.seed(45)
+    # Drums: almost zero swing (machine-gun precision), velocity accents on downbeats
+    # Ghost snare between backbeats, ghost kick 16ths, flams before accents
+    humanize_events(drums, swing=0.02, timing_jitter=3, velocity_jitter=4,
+                    flam_before_accents=True, accent_vel_threshold=105, ppq=ppq,
+                    bar_length_beats=4,
+                    micro_timing={KICK: {'jitter': 2, 'accent_beats': [0, 1, 2, 3], 'accent_boost': 12, 'soften_offbeats': 0}})
+    add_ghost_snare_between_backbeats(drums, ppq=ppq, bar_length_beats=4, vel=30, channel=CH_DRUMS)
+    add_ghost_kick_16ths(drums, ppq=ppq, bar_length_beats=4, vel=40, channel=CH_DRUMS)
+    # Bass: THE riff — micro timing variation +/-5 ticks, alternating velocity,
+    # slight crescendo through each bar
+    humanize_events(bass, swing=0.0, timing_jitter=0, velocity_jitter=0,
+                    ppq=ppq, bar_length_beats=4, crescendo_per_bar=2,
+                    micro_timing={
+                        45: {'jitter': 5, 'accent_beats': [0, 2], 'accent_boost': 10, 'soften_offbeats': 8},
+                        52: {'jitter': 5, 'accent_beats': [0, 2], 'accent_boost': 10, 'soften_offbeats': 8},
+                        57: {'jitter': 5, 'accent_beats': [0, 2], 'accent_boost': 10, 'soften_offbeats': 8},
+                        55: {'jitter': 5, 'accent_beats': [1, 3], 'accent_boost': 8, 'soften_offbeats': 8},
+                        53: {'jitter': 5, 'accent_beats': [1, 3], 'accent_boost': 8, 'soften_offbeats': 8},
+                        50: {'jitter': 5, 'accent_beats': [0, 2], 'accent_boost': 10, 'soften_offbeats': 8},
+                        48: {'jitter': 5, 'accent_beats': [1, 3], 'accent_boost': 8, 'soften_offbeats': 8},
+                        47: {'jitter': 5, 'accent_beats': [1, 3], 'accent_boost': 6, 'soften_offbeats': 8},
+                    })
+    # Guitar: power chords tight but some hit 5 ticks early for aggression
+    humanize_events(guitar, swing=0.0, timing_jitter=5, velocity_jitter=6,
+                    ppq=ppq, bar_length_beats=4)
+
     # Save
     save_track_midi(mid, drums, os.path.join(song_dir, "drums.mid"), "Drums", CH_DRUMS)
     save_track_midi(mid, bass, os.path.join(song_dir, "bass.mid"), "Bass", CH_BASS)
@@ -1091,6 +1438,24 @@ def gen_supermassive_black_hole():
         guitar_chorus_hits(b, 1.12)
         smbh_bass_slide(b, 1.1)
 
+    # --- Humanization: Muse funk groove ---
+    random.seed(46)
+    # Drums: funk swing 0.15, ghost snare hits already in pattern, add flams
+    humanize_events(drums, swing=0.15, timing_jitter=6, velocity_jitter=5,
+                    flam_before_accents=True, accent_vel_threshold=100, ppq=ppq,
+                    bar_length_beats=4,
+                    ghost_notes=[
+                        {'note': CLOSED_HAT, 'vel_range': (15, 22), 'every_n_ticks': ppq // 4, 'channel': CH_DRUMS, 'duration': int(ppq * 0.06)},
+                    ])
+    add_ghost_snare_between_backbeats(drums, ppq=ppq, bar_length_beats=4, vel=30, channel=CH_DRUMS)
+    # Guitar: tight timing but vary attack
+    humanize_events(guitar, swing=0.08, timing_jitter=5, velocity_jitter=6,
+                    ppq=ppq, bar_length_beats=4)
+    # Bass: funk octave jumps, slight humanization
+    humanize_events(bass, swing=0.10, timing_jitter=5, velocity_jitter=4,
+                    ppq=ppq, bar_length_beats=4)
+    add_bass_ghost_notes(bass, ppq=ppq, vel_range=(30, 40), channel=CH_BASS)
+
     # Save
     save_track_midi(mid, drums, os.path.join(song_dir, "drums.mid"), "Drums", CH_DRUMS)
     save_track_midi(mid, guitar, os.path.join(song_dir, "guitar.mid"), "Guitar", CH_GUITAR)
@@ -1272,6 +1637,20 @@ def gen_knights_of_cydonia():
     for n in [40, 52, 64, 71]:  # E octaves
         add_note(guitar, n, 120, final_base + trip, t(mid, 1.5), CH_GUITAR)
     add_note(bass, 40, 120, final_base + trip, t(mid, 1.5), CH_BASS)
+
+    # --- Humanization: Muse galloping 6/8, tight but dynamic ---
+    random.seed(47)
+    # Drums: tight triplet timing (only +/-3 ticks jitter), velocity swell 80-110
+    humanize_events(drums, swing=0.0, timing_jitter=3, velocity_jitter=8,
+                    flam_before_accents=True, accent_vel_threshold=105, ppq=ppq,
+                    bar_length_beats=3)  # 6/8 = 3 quarter notes per bar
+    # Guitar: gallop strict triplet timing but velocity swells every 2 bars
+    # Power chords: some hit 5 ticks early for aggression
+    humanize_events(guitar, swing=0.0, timing_jitter=3, velocity_jitter=10,
+                    ppq=ppq, bar_length_beats=3, crescendo_per_bar=3)
+    # Bass: galloping root, tight
+    humanize_events(bass, swing=0.0, timing_jitter=3, velocity_jitter=6,
+                    ppq=ppq, bar_length_beats=3, crescendo_per_bar=2)
 
     # Save
     save_track_midi(mid, drums, os.path.join(song_dir, "drums.mid"), "Drums", CH_DRUMS)

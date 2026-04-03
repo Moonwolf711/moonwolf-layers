@@ -10,6 +10,7 @@ with section-appropriate dynamics and signature musical moments.
 
 import json
 import os
+import random
 import mido
 from mido import MidiFile, MidiTrack, Message, MetaMessage
 
@@ -213,6 +214,235 @@ def fill_basic(track, duration_bars=1):
             track.append(Message('note_off', note=nt, velocity=0, channel=9, time=0))
 
 
+# ---------------------------------------------------------------------------
+# Humanization engine
+# ---------------------------------------------------------------------------
+def humanize_note(tick, velocity, ticks_per_beat, swing_amount=0.0,
+                  timing_jitter=10, vel_jitter=8):
+    """Apply swing, timing jitter, and velocity variation to a note."""
+    eighth = ticks_per_beat // 2
+    beat_pos = (tick % ticks_per_beat) / ticks_per_beat
+    # Swing offbeats
+    if 0.45 < beat_pos < 0.55:
+        tick += int(swing_amount * eighth)
+    tick += random.randint(-timing_jitter, timing_jitter)
+    tick = max(0, tick)
+    velocity += random.randint(-vel_jitter, vel_jitter)
+    velocity = max(30, min(127, velocity))
+    return tick, velocity
+
+
+# Per-song humanization profiles
+STYLE_ACDC = {
+    'swing': 0.05,
+    'drum_timing_jitter': 5,
+    'drum_vel_jitter': 4,
+    'guitar_timing_jitter': 3,
+    'guitar_vel_jitter': 5,
+    'bass_timing_jitter': 3,
+    'bass_vel_jitter': 4,
+    'ghost_hat_vel': (20, 30),
+    'ghost_snare_vel': (25, 35),
+    'crash_bar_interval': 4,       # crash on 1 every 4 bars hits HARD
+    'crash_vel': 120,
+}
+
+STYLE_SABBATH = {
+    'swing': 0.10,
+    'drum_timing_jitter': 12,
+    'drum_vel_jitter': 15,
+    'guitar_timing_jitter': 8,
+    'guitar_vel_jitter': 10,
+    'bass_timing_jitter': 8,
+    'bass_vel_jitter': 10,
+    'kick_late_offset': 10,        # kick sits slightly behind
+    'crash_early_offset': -8,      # crash hits early
+    'ghost_snare_vel': (30, 40),
+    'ghost_hat_vel': (20, 30),
+    'tom_fill_crescendo': True,
+}
+
+STYLE_EAGLES_HC = {
+    'swing': 0.15,                 # half-time feel
+    'drum_timing_jitter': 6,
+    'drum_vel_jitter': 5,
+    'guitar_timing_jitter': 4,
+    'guitar_vel_jitter': 4,
+    'bass_timing_jitter': 4,
+    'bass_vel_jitter': 3,
+    'ghost_hat_vel': (20, 28),
+    'ghost_snare_vel': (25, 35),
+    'verse_vel_range': (70, 85),
+    'chorus_vel_range': (85, 100),
+}
+
+STYLE_EAGLES_TIE = {
+    'swing': 0.10,
+    'drum_timing_jitter': 6,
+    'drum_vel_jitter': 5,
+    'guitar_timing_jitter': 4,
+    'guitar_vel_jitter': 4,
+    'bass_timing_jitter': 4,
+    'bass_vel_jitter': 3,
+    'ghost_hat_vel': (20, 28),
+    'ghost_snare_vel': (25, 35),
+    'verse_vel_range': (70, 85),
+    'chorus_vel_range': (85, 100),
+}
+
+
+def humanize_track(track, ticks_per_beat, swing_amount=0.0,
+                   timing_jitter=10, vel_jitter=8, kick_late=0,
+                   crash_early=0, is_drum=False):
+    """Walk a finished track and humanize timing + velocity in-place.
+    Works on delta-time MIDI messages."""
+    abs_tick = 0
+    events = []
+
+    # Convert to absolute ticks
+    for msg in track:
+        abs_tick += msg.time
+        events.append((abs_tick, msg))
+
+    new_track = MidiTrack()
+    for i, (abs_t, msg) in enumerate(events):
+        if isinstance(msg, MetaMessage):
+            events[i] = (abs_t, msg)
+            continue
+        if msg.type == 'note_on' and msg.velocity > 0:
+            note = msg.note
+            vel = msg.velocity
+            extra_offset = 0
+            if is_drum:
+                if note == KICK and kick_late:
+                    extra_offset = kick_late
+                if note == CRASH and crash_early:
+                    extra_offset = crash_early
+            new_tick, new_vel = humanize_note(
+                abs_t + extra_offset, vel, ticks_per_beat,
+                swing_amount, timing_jitter, vel_jitter
+            )
+            events[i] = (max(0, new_tick), msg.copy(velocity=new_vel))
+        else:
+            events[i] = (abs_t, msg)
+
+    # Sort by absolute tick (stable sort keeps note-on before note-off at same tick)
+    events.sort(key=lambda x: x[0])
+
+    # Convert back to delta times
+    prev_tick = 0
+    for abs_t, msg in events:
+        delta = max(0, abs_t - prev_tick)
+        if isinstance(msg, MetaMessage):
+            new_track.append(msg.copy(time=delta))
+        else:
+            new_track.append(msg.copy(time=delta))
+        prev_tick = abs_t
+
+    # Replace contents
+    track.clear()
+    for msg in new_track:
+        track.append(msg)
+
+
+def add_ghost_notes_to_drum_track(track, ticks_per_beat, style,
+                                  total_bars, section_boundaries=None):
+    """Insert ghost snare and ghost hat notes into a drum track.
+    section_boundaries = list of (bar_start, bar_end) for each section.
+    Adds snare drags before transitions."""
+    ghost_snare_lo, ghost_snare_hi = style.get('ghost_snare_vel', (25, 40))
+    ghost_hat_lo, ghost_hat_hi = style.get('ghost_hat_vel', (20, 30))
+    sixteenth = ticks_per_beat // 4
+    eighth = ticks_per_beat // 2
+    bar_len = ticks_per_beat * 4
+
+    # Convert to absolute time events
+    abs_tick = 0
+    events = []
+    for msg in track:
+        abs_tick += msg.time
+        events.append([abs_tick, msg])
+
+    ghost_events = []
+
+    # Walk through bars and add ghost notes
+    for bar in range(total_bars):
+        bar_start = bar * bar_len
+        for beat in range(4):
+            beat_start = bar_start + beat * ticks_per_beat
+            # Ghost hat taps at 16th note positions (e+a between 8th notes)
+            for sub in [1, 3]:  # the "e" and "a" of each beat
+                ghost_tick = beat_start + sub * sixteenth
+                vel = random.randint(ghost_hat_lo, ghost_hat_hi)
+                ghost_events.append((ghost_tick, CLOSED_HAT, vel))
+
+            # Ghost snare between main snare hits (beats 2 and 4)
+            if beat in (0, 2):  # add ghost snare before beats 2/4
+                ghost_tick = beat_start + ticks_per_beat - sixteenth
+                vel = random.randint(ghost_snare_lo, ghost_snare_hi)
+                # Only 50% chance to avoid cluttering
+                if random.random() < 0.5:
+                    ghost_events.append((ghost_tick, SNARE, vel))
+
+    # Add snare drags before section transitions
+    if section_boundaries:
+        for (sec_start, sec_end) in section_boundaries:
+            transition_bar = sec_end - 1
+            if transition_bar < 0 or transition_bar >= total_bars:
+                continue
+            drag_tick = (transition_bar + 1) * bar_len - eighth
+            # Two ghost hits before the main downbeat
+            ghost_events.append((drag_tick - sixteenth * 2, SNARE,
+                                 random.randint(ghost_snare_lo, ghost_snare_hi)))
+            ghost_events.append((drag_tick - sixteenth, SNARE,
+                                 random.randint(ghost_snare_lo, ghost_snare_hi + 5)))
+
+    # Merge ghost events into existing events
+    for tick, note, vel in ghost_events:
+        on_msg = Message('note_on', note=note, velocity=vel, channel=9, time=0)
+        off_msg = Message('note_off', note=note, velocity=0, channel=9, time=sixteenth // 2)
+        events.append([tick, on_msg])
+        events.append([tick + sixteenth // 2, off_msg])
+
+    # Sort by absolute tick
+    events.sort(key=lambda x: x[0])
+
+    # Convert back to delta times
+    track.clear()
+    prev_tick = 0
+    for abs_t, msg in events:
+        delta = max(0, abs_t - prev_tick)
+        if isinstance(msg, MetaMessage):
+            track.append(msg.copy(time=delta))
+        else:
+            track.append(msg.copy(time=delta))
+        prev_tick = abs_t
+
+
+def apply_guitar_alternating_vel(track, down_vel=90, up_vel=80):
+    """For palm-muted 8th note patterns, alternate down/up pick velocity."""
+    idx = 0
+    for msg in track:
+        if msg.type == 'note_on' and msg.velocity > 0:
+            if idx % 2 == 0:
+                msg.velocity = min(127, max(30, msg.velocity + (down_vel - 85)))
+            else:
+                msg.velocity = min(127, max(30, msg.velocity + (up_vel - 85)))
+            idx += 1
+
+
+def apply_arpeggio_crescendo(track, ticks_per_beat, notes_per_arp=8):
+    """Apply subtle crescendo through each arpeggio pattern."""
+    note_idx = 0
+    for msg in track:
+        if msg.type == 'note_on' and msg.velocity > 0:
+            pos_in_arp = note_idx % notes_per_arp
+            # Gradual velocity increase through the arpeggio
+            crescendo_add = int((pos_in_arp / notes_per_arp) * 8)
+            msg.velocity = min(127, msg.velocity + crescendo_add)
+            note_idx += 1
+
+
 # ===========================================================================
 # SONG 1: AC/DC - Back in Black (BPM 92, key E)
 # Structure: INTRO(4) VERSE(8) CHORUS(4) VERSE2(8) SOLO(4) OUTRO(4) = 32 bars
@@ -275,6 +505,14 @@ def gen_back_in_black():
     # Final crash
     crash_hit(track, EIGHTH, 120)
     drum_rest(track, WHOLE - SIXTEENTH)
+
+    # -- Humanize drums: AC/DC Phil Rudd tight style --
+    style = STYLE_ACDC
+    section_bounds = [(0, 4), (4, 12), (12, 16), (16, 24), (24, 28), (28, 32)]
+    add_ghost_notes_to_drum_track(track, TPB, style, total_bars, section_bounds)
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['drum_timing_jitter'],
+                   vel_jitter=style['drum_vel_jitter'], is_drum=True)
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/drums.mid")
@@ -358,6 +596,12 @@ def gen_back_in_black():
     add_chord(track, power_chord5(n('E4')), 115, WHOLE, channel=1)
     add_chord(track, power_chord5(n('E4')), 120, WHOLE, channel=1)
 
+    # -- Humanize guitar: AC/DC tight palm mutes --
+    apply_guitar_alternating_vel(track, down_vel=90, up_vel=80)
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['guitar_timing_jitter'],
+                   vel_jitter=style['guitar_vel_jitter'])
+
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/guitar.mid")
 
@@ -417,6 +661,11 @@ def gen_back_in_black():
     bass_verse(track, 2, vel_base=90)
     add_note(track, n('E2'), 110, WHOLE, channel=2)
     add_note(track, n('E2'), 115, WHOLE, channel=2)
+
+    # -- Humanize bass: AC/DC tight --
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['bass_timing_jitter'],
+                   vel_jitter=style['bass_vel_jitter'])
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/bass.mid")
@@ -493,6 +742,14 @@ def gen_highway_to_hell():
     crash_hit(track, EIGHTH, 127)
     drum_rest(track, WHOLE - SIXTEENTH)
 
+    # -- Humanize drums: AC/DC Phil Rudd tight --
+    style = STYLE_ACDC
+    section_bounds = [(0, 2), (2, 10), (10, 18), (18, 26), (26, 34), (34, 38)]
+    add_ghost_notes_to_drum_track(track, TPB, style, total_bars, section_bounds)
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['drum_timing_jitter'],
+                   vel_jitter=style['drum_vel_jitter'], is_drum=True)
+
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/drums.mid")
 
@@ -546,6 +803,12 @@ def gen_highway_to_hell():
     add_chord(track, power_chord5(n('A3')), 115, WHOLE, channel=1)
     add_chord(track, power_chord5(n('A3')), 120, WHOLE, channel=1)
 
+    # -- Humanize guitar: AC/DC tight palm mutes --
+    apply_guitar_alternating_vel(track, down_vel=90, up_vel=80)
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['guitar_timing_jitter'],
+                   vel_jitter=style['guitar_vel_jitter'])
+
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/guitar.mid")
 
@@ -587,6 +850,11 @@ def gen_highway_to_hell():
     hth_bass_verse(track, 2, vel_base=90)
     add_note(track, n('A2'), 110, WHOLE, channel=2)
     add_note(track, n('A2'), 115, WHOLE, channel=2)
+
+    # -- Humanize bass: AC/DC tight --
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['bass_timing_jitter'],
+                   vel_jitter=style['bass_vel_jitter'])
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/bass.mid")
@@ -696,6 +964,14 @@ def gen_thunderstruck():
     crash_hit(track, EIGHTH, 127)
     drum_rest(track, WHOLE - SIXTEENTH)
 
+    # -- Humanize drums: AC/DC Phil Rudd tight --
+    style = STYLE_ACDC
+    section_bounds = [(0, 8), (8, 12), (12, 20), (20, 24), (24, 32), (32, 36), (36, 40)]
+    add_ghost_notes_to_drum_track(track, TPB, style, total_bars, section_bounds)
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['drum_timing_jitter'],
+                   vel_jitter=style['drum_vel_jitter'], is_drum=True)
+
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/drums.mid")
 
@@ -759,6 +1035,12 @@ def gen_thunderstruck():
     # Final bar: big B5
     add_chord(track, power_chord5(n('B3')), 120, WHOLE, channel=1)
 
+    # -- Humanize guitar: AC/DC tight palm mutes --
+    apply_guitar_alternating_vel(track, down_vel=90, up_vel=80)
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['guitar_timing_jitter'],
+                   vel_jitter=style['guitar_vel_jitter'])
+
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/guitar.mid")
 
@@ -805,6 +1087,11 @@ def gen_thunderstruck():
             vel = 100 if eighth == 0 else 88
             add_note(track, n('B2'), vel, EIGHTH, channel=2)
     add_note(track, n('B2'), 115, WHOLE, channel=2)
+
+    # -- Humanize bass: AC/DC tight --
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['bass_timing_jitter'],
+                   vel_jitter=style['bass_vel_jitter'])
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/bass.mid")
@@ -949,6 +1236,17 @@ def gen_iron_man():
     crash_hit(track, EIGHTH, 127)
     drum_rest(track, WHOLE - SIXTEENTH)
 
+    # -- Humanize drums: Sabbath Bill Ward heavy + behind --
+    style = STYLE_SABBATH
+    section_bounds = [(0, 4), (4, 12), (12, 20), (20, 24), (24, 28), (28, 36), (36, 40)]
+    add_ghost_notes_to_drum_track(track, TPB, style, total_bars, section_bounds)
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['drum_timing_jitter'],
+                   vel_jitter=style['drum_vel_jitter'],
+                   kick_late=style['kick_late_offset'],
+                   crash_early=style['crash_early_offset'],
+                   is_drum=True)
+
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/drums.mid")
 
@@ -987,6 +1285,11 @@ def gen_iron_man():
     add_chord(track, power_chord5(n('B2')), 110, WHOLE, channel=1)
     add_chord(track, power_chord5(n('B2')), 120, WHOLE, channel=1)
 
+    # -- Humanize guitar: Sabbath heavy, slight push on power chords --
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['guitar_timing_jitter'],
+                   vel_jitter=style['guitar_vel_jitter'])
+
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/guitar.mid")
 
@@ -1017,6 +1320,11 @@ def gen_iron_man():
     iron_man_bass_riff(track, 2, vel_base=92)
     add_note(track, n('B1'), 108, WHOLE, channel=2)
     add_note(track, n('B1'), 115, WHOLE, channel=2)
+
+    # -- Humanize bass: Sabbath heavy --
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['bass_timing_jitter'],
+                   vel_jitter=style['bass_vel_jitter'])
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/bass.mid")
@@ -1108,6 +1416,17 @@ def gen_paranoid():
     crash_hit(track, EIGHTH, 127)
     drum_rest(track, WHOLE - SIXTEENTH)
 
+    # -- Humanize drums: Sabbath Bill Ward heavy + behind --
+    style = STYLE_SABBATH
+    section_bounds = [(0, 2), (2, 10), (10, 14), (14, 22), (22, 26), (26, 30)]
+    add_ghost_notes_to_drum_track(track, TPB, style, total_bars, section_bounds)
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['drum_timing_jitter'],
+                   vel_jitter=style['drum_vel_jitter'],
+                   kick_late=style['kick_late_offset'],
+                   crash_early=style['crash_early_offset'],
+                   is_drum=True)
+
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/drums.mid")
 
@@ -1181,6 +1500,11 @@ def gen_paranoid():
     # Final hit
     add_chord(track, power_chord5(n('E4')), 120, WHOLE, channel=1)
 
+    # -- Humanize guitar: Sabbath heavy riffs --
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['guitar_timing_jitter'],
+                   vel_jitter=style['guitar_vel_jitter'])
+
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/guitar.mid")
 
@@ -1222,6 +1546,11 @@ def gen_paranoid():
             vel = 95 if eighth == 0 else 85
             add_note(track, n('E2'), vel, EIGHTH, channel=2)
     add_note(track, n('E2'), 115, WHOLE, channel=2)
+
+    # -- Humanize bass: Sabbath heavy --
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['bass_timing_jitter'],
+                   vel_jitter=style['bass_vel_jitter'])
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/bass.mid")
@@ -1310,6 +1639,14 @@ def gen_hotel_california():
     crash_hit(track, EIGHTH, 90)
     drum_rest(track, WHOLE - SIXTEENTH)
 
+    # -- Humanize drums: Eagles Don Henley smooth pocket --
+    style = STYLE_EAGLES_HC
+    section_bounds = [(0, 4), (4, 12), (12, 20), (20, 28), (28, 36), (36, 40)]
+    add_ghost_notes_to_drum_track(track, TPB, style, total_bars, section_bounds)
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['drum_timing_jitter'],
+                   vel_jitter=style['drum_vel_jitter'], is_drum=True)
+
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/drums.mid")
 
@@ -1359,6 +1696,12 @@ def gen_hotel_california():
     # OUTRO (4 bars): arpeggios fade
     arpeggio_pattern(track, 4, vel_base=60)
 
+    # -- Humanize guitar: Eagles smooth arpeggios with crescendo --
+    apply_arpeggio_crescendo(track, TPB, notes_per_arp=8)
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['guitar_timing_jitter'],
+                   vel_jitter=style['guitar_vel_jitter'])
+
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/guitar.mid")
 
@@ -1390,6 +1733,11 @@ def gen_hotel_california():
 
     # OUTRO (4 bars)
     hc_bass(track, 4, vel_base=72)
+
+    # -- Humanize bass: Eagles smooth pocket --
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['bass_timing_jitter'],
+                   vel_jitter=style['bass_vel_jitter'])
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/bass.mid")
@@ -1470,6 +1818,14 @@ def gen_take_it_easy():
               hat_note=OPEN_HAT, crash_every=0, first_beat_time=EIGHTH)
     drum_rest(track, WHOLE)
 
+    # -- Humanize drums: Eagles smooth pocket --
+    style = STYLE_EAGLES_TIE
+    section_bounds = [(0, 4), (4, 12), (12, 16), (16, 24), (24, 28), (28, 32)]
+    add_ghost_notes_to_drum_track(track, TPB, style, total_bars, section_bounds)
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['drum_timing_jitter'],
+                   vel_jitter=style['drum_vel_jitter'], is_drum=True)
+
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/drums.mid")
 
@@ -1515,6 +1871,11 @@ def gen_take_it_easy():
     country_strum(track, 'G', 4, vel_base=60)
     country_strum(track, 'G', 4, vel_base=50)
 
+    # -- Humanize guitar: Eagles smooth strumming --
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['guitar_timing_jitter'],
+                   vel_jitter=style['guitar_vel_jitter'])
+
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/guitar.mid")
 
@@ -1559,6 +1920,11 @@ def gen_take_it_easy():
         for q in range(4):
             vel = 72 if q == 0 else 60
             add_note(track, root, vel, QUARTER, channel=2)
+
+    # -- Humanize bass: Eagles smooth --
+    humanize_track(track, TPB, swing_amount=style['swing'],
+                   timing_jitter=style['bass_timing_jitter'],
+                   vel_jitter=style['bass_vel_jitter'])
 
     mid.tracks.append(track)
     save_midi(mid, f"{song_dir}/bass.mid")

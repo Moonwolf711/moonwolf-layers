@@ -19,6 +19,7 @@ import math
 import time
 import random
 import threading
+import json
 import numpy as np
 import pygame
 import mido
@@ -1054,15 +1055,57 @@ class MoonwolfLayers:
         if self.song_list:
             song_info = self.song_list[self.song_idx]
             song_folder = song_info["folder"]
-            # Load full.mid from the song library
-            song_data = load_song(song_folder)
-            full_mid_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "songs", song_folder, "full.mid")
-            if os.path.exists(full_mid_path):
-                self.bpm = song_info.get("bpm", self.bpm) or self.bpm
-                self.levels, self.bpm = load_levels_from_midi(full_mid_path, self.bpm)
-                print(f"  Song: {song_info['artist']} - {song_info['title']}")
+            songs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "songs", song_folder)
+            meta_path = os.path.join(songs_dir, "meta.json")
+
+            # Read meta.json for BPM and layer info
+            meta = {}
+            if os.path.exists(meta_path):
+                with open(meta_path) as f:
+                    meta = json.load(f)
+            self.bpm = meta.get("bpm", song_info.get("bpm", self.bpm)) or self.bpm
+
+            if "layers" in meta:
+                # New multi-layer format: each layer file becomes its own Level
+                self.levels = []
+                for layer_info in meta["layers"]:
+                    mid_path = os.path.join(songs_dir, layer_info["file"])
+                    if not os.path.exists(mid_path):
+                        print(f"  WARNING: Layer file not found: {layer_info['file']}")
+                        continue
+                    levels_from_file, _ = load_levels_from_midi(mid_path, self.bpm)
+                    if levels_from_file:
+                        # Pick first level that has actual notes
+                        level = None
+                        for lf in levels_from_file:
+                            if lf.pickups or lf.drum_lanes:
+                                level = lf
+                                break
+                        if level is None:
+                            level = levels_from_file[0]
+                        level.name = layer_info["name"]
+                        level.instrument_name = layer_info.get("instrument", "Unknown")
+                        level.midi_channel = layer_info.get("midi_ch", 0)
+                        # Drum layers (ch 10 in meta = ch 9 zero-indexed) show drum lane view
+                        if layer_info.get("midi_ch", 0) == 10 and not level.drum_lanes:
+                            pass  # File already parsed; drum_lanes populated by channel 9
+                        self.levels.append(level)
+                if not self.levels:
+                    # Fallback to full.mid if no layers loaded
+                    full_path = os.path.join(songs_dir, "full.mid")
+                    if os.path.exists(full_path):
+                        self.levels, self.bpm = load_levels_from_midi(full_path, self.bpm)
+                    else:
+                        self.levels = generate_default_levels(self.bpm, self.key_name, self.is_major)
+                print(f"  Song: {song_info['artist']} - {song_info['title']} ({len(self.levels)} layers)")
             else:
-                self.levels = generate_default_levels(self.bpm, self.key_name, self.is_major)
+                # Old format — use full.mid
+                full_mid_path = os.path.join(songs_dir, "full.mid")
+                if os.path.exists(full_mid_path):
+                    self.levels, self.bpm = load_levels_from_midi(full_mid_path, self.bpm)
+                    print(f"  Song: {song_info['artist']} - {song_info['title']}")
+                else:
+                    self.levels = generate_default_levels(self.bpm, self.key_name, self.is_major)
         elif self.midi_file:
             self.levels, self.bpm = load_levels_from_midi(self.midi_file, self.bpm)
         else:
@@ -1877,6 +1920,8 @@ class MoonwolfLayers:
 
         self.level = self.levels[self.current_level]
         self.scroll_speed = self.level.scroll_speed
+        midi_ch = getattr(self.level, 'midi_channel', 0)
+        print(f"  Arm track for: {self.level.instrument_name} (Ch. {midi_ch})")
         self.state = "LEVEL_INTRO"
         self.state_timer = 0
         self.star_power = False
@@ -2572,12 +2617,20 @@ class MoonwolfLayers:
             song_title = self.font_menu.render(f"{song['artist']} - {song['title']}", True, C_HUD_DIM)
             self.screen.blit(song_title, (cx - song_title.get_width()//2, cy - 60))
 
+        # Layer progress
+        layer_label = self.font.render(f"Layer {self.current_level + 1} of {len(self.levels)}", True, C_HUD_DIM)
+        self.screen.blit(layer_label, (cx - layer_label.get_width()//2, cy - 50))
+
         # Level name
         title = self.font_title.render(f"{self.level.name}", True, C_NEON_PINK)
-        self.screen.blit(title, (cx - title.get_width()//2, cy - 40))
+        self.screen.blit(title, (cx - title.get_width()//2, cy - 30))
 
-        inst = self.font_big.render(f"{self.level.instrument_name}  |  {self.bpm} BPM  |  {self.level.bars} bars", True, C_HUD)
+        inst = self.font_big.render(f"Load: {self.level.instrument_name} in Ableton", True, C_HUD)
         self.screen.blit(inst, (cx - inst.get_width()//2, cy + 10))
+
+        midi_ch = getattr(self.level, 'midi_channel', 0)
+        ch_label = self.font.render(f"MIDI Ch. {midi_ch}  |  {self.bpm} BPM  |  {self.level.bars} bars", True, C_HUD_DIM)
+        self.screen.blit(ch_label, (cx - ch_label.get_width()//2, cy + 35))
 
         # Active layers
         if self.locked_levels > 0:
@@ -2673,8 +2726,8 @@ class MoonwolfLayers:
         bar_num = int(self.camera_x / max(1, lv.level_width) * lv.bars) + 1
         texts = [
             (f"MOONWOLF LAYERS", C_NEON_CYAN, 10, 8, self.font_big),
-            (f"Level {self.current_level+1}: {lv.name} | {self.bpm} BPM | Bar {bar_num}/{lv.bars}", C_HUD, 10, 35, self.font),
-            (f"Score: {self.score} | Combo: x{self.combo} | Layers: {self.locked_levels} | {'REC' if self.ableton_recording else 'IDLE'}", C_HUD_DIM, 10, 52, self.font),
+            (f"Layer {self.current_level+1}/{len(self.levels)}: {lv.name} ({lv.instrument_name}) | {self.bpm} BPM | Bar {bar_num}/{lv.bars}", C_HUD, 10, 35, self.font),
+            (f"Score: {self.score} | Combo: x{self.combo} | Layers: {self.locked_levels}/{len(self.levels)} | {'REC' if self.ableton_recording else 'IDLE'}", C_HUD_DIM, 10, 52, self.font),
             (f"[+/-]=BPM [R]=Restart [ESC]=Quit | Combo {STAR_POWER_THRESHOLD}+ = Star Power (free riff!)", C_HUD_DIM, 10, HEIGHT - 18, self.font),
         ]
         for text, color, x, y, font in texts:
