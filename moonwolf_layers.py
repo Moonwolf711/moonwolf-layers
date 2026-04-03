@@ -681,10 +681,22 @@ def load_levels_from_midi(filepath, bpm_override=None):
     else:
         note_events_shifted = []
 
+    # Determine the melody MIDI channel from the source data
+    mel_channel = 0  # default
+    if note_events:
+        # Use the most common channel in the melody events
+        from collections import Counter
+        ch_counts = Counter(c for _, _, _, c in note_events)
+        mel_channel = ch_counts.most_common(1)[0][0]
+
     levels = []
-    levels.append(Level("DRUMS", bpm, drum_bars, [], drum_events, "Drum Kit"))
+    drum_level = Level("DRUMS", bpm, drum_bars, [], drum_events, "Drum Kit")
+    drum_level.midi_channel = 9  # Always drum channel
+    levels.append(drum_level)
     if note_events_shifted:
-        levels.append(Level("MELODY", bpm, mel_bars, note_events_shifted, [], "Lead Synth"))
+        mel_level = Level("MELODY", bpm, mel_bars, note_events_shifted, [], "Lead Synth")
+        mel_level.midi_channel = mel_channel
+        levels.append(mel_level)
 
     return levels, bpm
 
@@ -716,15 +728,16 @@ def generate_default_levels(bpm, key_name, is_major):
             note_events.append((t, note, 100, 0))
             t += beat_dur
 
-    levels = [
-        Level("DRUMS", bpm, 16, [], drum_events, "Drum Kit"),
-        Level("MELODY", bpm, 16, note_events, [], "Lead Synth"),
-    ]
+    drum_level = Level("DRUMS", bpm, 16, [], drum_events, "Drum Kit")
+    drum_level.midi_channel = 9
+    mel_level = Level("MELODY", bpm, 16, note_events, [], "Lead Synth")
+    mel_level.midi_channel = 0  # Keys/synth channel
+    levels = [drum_level, mel_level]
     return levels
 
 # ======================== GAME ========================
 class MoonwolfLayers:
-    def __init__(self, bpm=124, key_name="E", is_major=False, port_name="FE Bridge", midi_file=None):
+    def __init__(self, bpm=124, key_name="E", is_major=False, port_name="FE Bridge", midi_file=None, demo_mode=False):
         pygame.init()
         pygame.joystick.init()
 
@@ -871,6 +884,10 @@ class MoonwolfLayers:
         self._next_note_y = None
         self._next_note_dist = 0
         self.combo_pulse = 0.0  # Visual pulse when combo increases (0..1 decays)
+
+        # Demo/auto-play mode — bot plays optimally
+        self.demo_mode = demo_mode
+        self.demo_auto_advance_timer = 0.0
 
     def _scan_midi_ports(self):
         """Get available MIDI output ports."""
@@ -1315,6 +1332,13 @@ class MoonwolfLayers:
 
     def _open_midi(self, port_name):
         try:
+            # Close existing port first to prevent port leak
+            if self.midi_port:
+                try:
+                    self.midi_port.close()
+                except Exception:
+                    pass
+                self.midi_port = None
             available = mido.get_output_names()
             matches = [n for n in available if port_name.lower() in n.lower()]
             if matches:
@@ -1635,8 +1659,36 @@ class MoonwolfLayers:
                         elif i == 5:
                             self._adjust_bpm(2)
 
+            # Demo mode auto-advance through menus
+            if self.demo_mode:
+                self.demo_auto_advance_timer += dt
+                if self.state == "PROFILE_SELECT" and self.demo_auto_advance_timer > 0.5:
+                    # Auto-create demo profile
+                    self.profile = save_system.new_profile("DemoBot", "wolf")
+                    self.state = "MAIN_MENU"
+                    self.demo_auto_advance_timer = 0
+                elif self.state == "MAIN_MENU" and self.demo_auto_advance_timer > 1.0:
+                    # Pick a random song and start
+                    if self.song_list:
+                        self.song_idx = random.randint(0, len(self.song_list) - 1)
+                    self._init_game()
+                    self.demo_auto_advance_timer = 0
+                elif self.state == "LEVEL_INTRO" and self.demo_auto_advance_timer > 2.0:
+                    self._start_level()
+                    self.demo_auto_advance_timer = 0
+                elif self.state == "LEVEL_COMPLETE" and self.demo_auto_advance_timer > 3.0:
+                    self._next_level()
+                    self.demo_auto_advance_timer = 0
+
             self._update(dt)
             self._draw()
+
+            # Demo mode overlay
+            if self.demo_mode and self.state in ("PLAYING", "STAR_POWER"):
+                # Show "DEMO MODE" + bot stats overlay
+                demo_surf = self.font_big.render("DEMO MODE — BOT PLAYING", True, C_STAR_GOLD)
+                self.screen.blit(demo_surf, (WIDTH // 2 - demo_surf.get_width() // 2, HEIGHT - 40))
+
             pygame.display.flip()
 
         self._cleanup()
@@ -1773,6 +1825,42 @@ class MoonwolfLayers:
         if keys[pygame.K_UP]: joy_y = -0.8
         if keys[pygame.K_DOWN]: joy_y = 0.8
 
+        # ===== DEMO BOT — auto-play for testing =====
+        if self.demo_mode:
+            player_x = self.camera_x + 200
+
+            # Auto-steer ship toward next uncollected melody note
+            best_ahead = 99999
+            target_y = self.p1_y
+            for pickup in self.level.pickups:
+                if pickup[3]:
+                    continue
+                px, py, note, _ = pickup
+                ahead = px - player_x
+                if -20 < ahead < 500 and ahead < best_ahead:
+                    best_ahead = ahead
+                    target_y = py
+
+            # Aggressive steering — tight proportional + velocity damping
+            diff = target_y - self.p1_y
+            if abs(diff) > 3:
+                # Stronger proportional gain + anticipation (reduce overshoot)
+                p_gain = diff / 40.0
+                d_gain = -self.p1_vy / 600.0  # Dampen if already moving toward target
+                joy_y = max(-1.0, min(1.0, p_gain + d_gain))
+            else:
+                joy_y = 0
+                self.p1_vy *= 0.5  # Hard brake when close
+
+            # Auto-hit drums when targets reach the hit line
+            for dl in self.level.drum_lanes:
+                if dl[3]:
+                    continue
+                dx, lane_idx, drum_note, _ = dl
+                dist = abs(player_x - dx)
+                if dist < 20:  # Hit at perfect timing
+                    self._on_fe_button(lane_idx)
+
         # Speed
         self.speed_mult = 1.0 + joy_x * 0.3
         self.speed_mult = max(0.5, min(1.5, self.speed_mult))
@@ -1899,7 +1987,7 @@ class MoonwolfLayers:
                 collect_radius = 77 if self.soar else 55  # Eagle: +40%
                 if dy < collect_radius:
                     # Ship is close — full velocity, score it
-                    self.note_on(note, 100, self.p1_midi_ch)
+                    self.note_on(note, 100, getattr(self.level, 'midi_channel', self.p1_midi_ch))
                     self.hits += 1
                     self.combo += 1
                     self.combo_pulse = 1.0
@@ -1929,10 +2017,11 @@ class MoonwolfLayers:
                         self.particles.emit(200, int(py), 4, C_HUD, 60)
                 else:
                     # Ship is far — play note quietly (song stays intact) but no score
-                    self.note_on(note, 50, self.p1_midi_ch)  # Quieter
+                    self.note_on(note, 50, getattr(self.level, 'midi_channel', self.p1_midi_ch))  # Quieter
                     self._try_break_combo(200, int(py))
 
-                self.pending_offs.append((note, self.p1_midi_ch, time.time() + 0.25))
+                mel_ch = getattr(self.level, 'midi_channel', self.p1_midi_ch)
+                self.pending_offs.append((note, mel_ch, time.time() + 0.25))
 
         # Auto-play drum targets that pass the hit line (so song stays in time)
         for dl in self.level.drum_lanes:
@@ -1953,8 +2042,9 @@ class MoonwolfLayers:
                 degree = int(self.p1_y / HEIGHT * len(self.scale))
                 degree = max(0, min(len(self.scale) - 1, degree))
                 riff_note = self.scale[degree]
-                self.note_on(riff_note, 100, self.p1_midi_ch)
-                self.pending_offs.append((riff_note, self.p1_midi_ch, time.time() + 0.15))
+                riff_ch = getattr(self.level, 'midi_channel', self.p1_midi_ch)
+                self.note_on(riff_note, 100, riff_ch)
+                self.pending_offs.append((riff_note, riff_ch, time.time() + 0.15))
 
         # Fire trail and sparkles — only on melody levels with visible ship
         if is_melody_level:
@@ -2576,20 +2666,27 @@ def main():
     port_name = "FE Bridge"
     midi_file = None
 
+    demo_mode = False
+
     for i, arg in enumerate(sys.argv):
         if arg == "--bpm" and i + 1 < len(sys.argv): bpm = int(sys.argv[i + 1])
         elif arg == "--key" and i + 1 < len(sys.argv): key_name = sys.argv[i + 1]
         elif arg == "--major": is_major = True
         elif arg == "--port" and i + 1 < len(sys.argv): port_name = sys.argv[i + 1]
         elif arg == "--midi" and i + 1 < len(sys.argv): midi_file = sys.argv[i + 1]
+        elif arg == "--demo": demo_mode = True
 
     print()
     print("=" * 50)
-    print("  MOONWOLF LAYERS v2.0")
-    print("  Layer loops. Build songs. Star Power riffs.")
+    if demo_mode:
+        print("  MOONWOLF LAYERS v2.0 — DEMO MODE")
+        print("  Bot plays optimally. Watch and learn!")
+    else:
+        print("  MOONWOLF LAYERS v2.0")
+        print("  Layer loops. Build songs. Star Power riffs.")
     print("=" * 50)
 
-    game = MoonwolfLayers(bpm, key_name, is_major, port_name, midi_file)
+    game = MoonwolfLayers(bpm, key_name, is_major, port_name, midi_file, demo_mode=demo_mode)
     game.run()
 
 if __name__ == "__main__":
