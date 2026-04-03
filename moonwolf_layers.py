@@ -559,102 +559,70 @@ TRANSPORT_CC_PLAY = 119
 TRANSPORT_CC_STOP = 118
 TRANSPORT_CC_RECORD = 117
 
-# ======================== ABLETON OSC CONTROL ========================
-# AbletonOSC on port 11000 — transport, BPM, recording, looping
-import struct
+# ======================== ABLETON LIVEAPI VIA COLAB ========================
+# CoLaB M4L device on UDP port 8001 handles /live/... commands directly
+# Uses LiveAPI — no extra Remote Script needed, just CoLaB loaded on a track
 import socket
 
-ABLETON_OSC_HOST = "127.0.0.1"
-ABLETON_OSC_PORT = 11000
-
-def _osc_encode(address, *args):
-    """Encode a simple OSC message (supports int, float, string)."""
-    # Pad address to 4-byte boundary
-    addr = address.encode('utf-8') + b'\x00'
-    while len(addr) % 4 != 0:
-        addr += b'\x00'
-    # Type tag
-    tags = ','
-    data = b''
-    for a in args:
-        if isinstance(a, int):
-            tags += 'i'
-            data += struct.pack('>i', a)
-        elif isinstance(a, float):
-            tags += 'f'
-            data += struct.pack('>f', a)
-        elif isinstance(a, str):
-            tags += 's'
-            s = a.encode('utf-8') + b'\x00'
-            while len(s) % 4 != 0:
-                s += b'\x00'
-            data += s
-    tags_b = tags.encode('utf-8') + b'\x00'
-    while len(tags_b) % 4 != 0:
-        tags_b += b'\x00'
-    return addr + tags_b + data
+COLAB_HOST = "127.0.0.1"
+COLAB_PORT = 8001
 
 class AbletonOSC:
-    """Send OSC commands to Ableton Live via AbletonOSC Remote Script."""
-    def __init__(self, host=ABLETON_OSC_HOST, port=ABLETON_OSC_PORT):
+    """Control Ableton via CoLaB M4L device (UDP port 8001).
+    Send plain text /live/... commands — CoLaB executes them via LiveAPI."""
+    def __init__(self, host=COLAB_HOST, port=COLAB_PORT):
         self.host = host
         self.port = port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.connected = False
-        try:
-            self.sock.settimeout(0.1)
-            self.connected = True
-            print(f"  AbletonOSC: ready on {host}:{port}")
-        except Exception as e:
-            print(f"  AbletonOSC error: {e}")
+        self.connected = True
+        print(f"  Ableton LiveAPI: via CoLaB UDP {host}:{port}")
 
-    def send(self, address, *args):
-        if not self.connected:
-            return
+    def send(self, command):
+        """Send a plain text command to CoLaB."""
         try:
-            msg = _osc_encode(address, *args)
-            self.sock.sendto(msg, (self.host, self.port))
+            self.sock.sendto(command.encode('utf-8'), (self.host, self.port))
         except Exception as e:
-            print(f"  OSC send error: {e}")
+            print(f"  LiveAPI send error: {e}")
 
     def set_tempo(self, bpm):
-        self.send('/live/song/set/tempo', float(bpm))
+        self.send(f"/live/song/set/tempo {bpm}")
 
     def play(self):
-        self.send('/live/song/start_playing')
+        self.send("/live/song/start_playing")
 
     def stop(self):
-        self.send('/live/song/stop_playing')
+        self.send("/live/song/stop_playing")
 
     def record(self):
-        """Toggle session record."""
-        self.send('/live/song/set/session_record', 1)
+        self.send("/live/song/set/session_record 1")
 
     def stop_record(self):
-        self.send('/live/song/set/session_record', 0)
+        self.send("/live/song/set/session_record 0")
 
-    def set_loop(self, enabled=True):
-        self.send('/live/song/set/loop', 1 if enabled else 0)
-
-    def set_loop_start(self, beats):
-        self.send('/live/song/set/loop_start', float(beats))
-
-    def set_loop_length(self, beats):
-        self.send('/live/song/set/loop_length', float(beats))
+    def set_metronome(self, on=True):
+        self.send(f"/live/song/set/metronome {1 if on else 0}")
 
     def fire_clip(self, track, clip):
-        """Fire a clip in session view."""
-        self.send('/live/clip/fire', track, clip)
+        self.send(f"/live/clip/fire {track} {clip}")
 
     def stop_track(self, track):
-        self.send('/live/track/stop', track)
+        self.send(f"/live/track/stop {track}")
 
     def arm_track(self, track, armed=True):
-        self.send('/live/track/set/arm', track, 1 if armed else 0)
+        self.send(f"/live/track/set/arm {track} {1 if armed else 0}")
 
-    def set_track_input_channel(self, track, channel):
-        """Set MIDI input routing channel for a track."""
-        self.send('/live/track/set/input_routing_channel', track, channel)
+    def mute_track(self, track, muted=True):
+        self.send(f"/live/track/set/mute {track} {1 if muted else 0}")
+
+    def set_volume(self, track, vol):
+        self.send(f"/live/track/set/volume {track} {vol}")
+
+    def fire_scene(self, scene):
+        self.send(f"/live/scene/fire {scene}")
+
+    def log(self, msg):
+        """Send a message to CoLaB's console."""
+        self.send(f"[INFO] {msg}")
 
     def close(self):
         self.sock.close()
