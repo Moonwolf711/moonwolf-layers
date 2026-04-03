@@ -65,7 +65,8 @@ class Layer:
         self.name = name          # "drums", "bass", "guitar", etc.
         self.channel = channel
         self.bpm = bpm
-        self.notes = notes        # [(time_sec, note, velocity, duration_sec), ...]
+        self.notes = notes        # [(time_sec, note, velocity, duration_sec), ...]  — reference pattern
+        self.recorded = []        # [(time_sec, note, velocity, duration_sec), ...]  — what player actually played
         self.loop_duration = (60.0 / bpm) * 4 * LOOP_BARS  # 8 bars in seconds
         self.state = "waiting"    # waiting, recording, looping, skipped
 
@@ -209,14 +210,15 @@ class Looper:
         threading.Thread(target=reader, daemon=True).start()
 
     def _on_button(self, idx):
-        """Button pressed — send drum MIDI."""
+        """Button pressed — send MIDI + record into layer."""
         if self.state != "PLAYING":
             return
         layer = self.layers[self.current_layer_idx]
-        if layer.name == "drums":
-            note = FE_DRUM.get(idx, 36)
-            self._send_note(note, 100, 9, 0.15)
-            self.played_notes.append((self.playhead, note, 100))
+        note = FE_DRUM.get(idx, 36)
+        self._send_note(note, 100, layer.channel, 0.15)
+        # Record into layer for live looping
+        layer.recorded.append((self.playhead, note, 100, 0.15))
+        self.played_notes.append((self.playhead, note, 100))
 
     def _send_note(self, note, vel, ch, dur=0.2):
         if self.midi_port:
@@ -292,10 +294,28 @@ class Looper:
                             self.layers[self.current_layer_idx].state = "skipped"
                             self._advance_to_next_layer()
 
-                    # Keyboard drum triggers (1-8) during PLAYING
+                    # Controls during PLAYING
                     elif self.state == "PLAYING":
                         if pygame.K_1 <= event.key <= pygame.K_8:
                             self._on_button(event.key - pygame.K_1)
+                        elif event.key == pygame.K_RETURN:
+                            # Accept this take — lock the layer as looping
+                            layer = self.layers[self.current_layer_idx]
+                            layer.state = "looping"
+                            self._send_transport(CC_RECORD)
+                            print(f"  Locked: {layer.name} ({len(layer.recorded)} notes looping)")
+                            self._advance_to_next_layer()
+                        elif event.key == pygame.K_r:
+                            # Redo — clear and restart recording this layer
+                            self.layers[self.current_layer_idx].recorded = []
+                            self.played_notes = []
+                            self.playhead = 0.0
+                            self.loop_count = 0
+                            print(f"  Redo: {self.layers[self.current_layer_idx].name}")
+                        elif event.key == pygame.K_TAB:
+                            # Quick-skip to next layer without recording
+                            self.layers[self.current_layer_idx].state = "skipped"
+                            self._advance_to_next_layer()
 
             self._tick_note_offs()
             self._update(dt)
@@ -326,14 +346,18 @@ class Looper:
         self.playhead = 0.0
         self.loop_count = 0
         self.played_notes = []
-        self.layers[self.current_layer_idx].state = "recording"
+        layer = self.layers[self.current_layer_idx]
+        layer.recorded = []  # Clear previous recording
+        layer.state = "recording"
         self.state = "PLAYING"
         # Tell Ableton to record
         self._send_transport(CC_PLAY)
         time.sleep(0.1)
         self._send_transport(CC_RECORD)
-        layer = self.layers[self.current_layer_idx]
+        looping = [l.name for l in self.layers if l.state == "looping"]
         print(f"  Recording: {layer.name} (ch.{layer.channel}) — 8 bars at {self.bpm} BPM")
+        if looping:
+            print(f"  Looping: {', '.join(looping)}")
 
     def _advance_to_next_layer(self):
         # Find next waiting layer
@@ -358,6 +382,7 @@ class Looper:
         old_playhead = self.playhead
         self.playhead += dt
         beat_dur = 60.0 / self.bpm
+        loop_dur = layer.loop_duration
 
         # Beat tracking
         old_beat = int(old_playhead / beat_dur)
@@ -365,23 +390,33 @@ class Looper:
         if new_beat > old_beat:
             self.beat_flash = 1.0
 
-        # Auto-play the pattern notes as they pass (guide track)
-        # These are the TARGET notes — play them quietly so you hear the reference
-        for t, note, vel, dur in layer.notes:
-            # Check if this note just passed the playhead
-            if old_playhead <= t < self.playhead:
-                # Play the reference note at low velocity (guide)
-                ref_vel = min(vel, 45)  # Quiet guide
-                self._send_note(note, ref_vel, layer.channel, dur)
+        # === LIVE LOOPER: play back all completed layers ===
+        for l in self.layers:
+            if l.state != "looping" or not l.recorded:
+                continue
+            for t, note, vel, dur in l.recorded:
+                if old_playhead % loop_dur <= t < self.playhead % loop_dur:
+                    self._send_note(note, vel, l.channel, dur)
+                # Handle loop wrap-around
+                elif old_playhead % loop_dur > self.playhead % loop_dur:
+                    # We wrapped — check if note is in the wrap zone
+                    if t >= old_playhead % loop_dur or t < self.playhead % loop_dur:
+                        self._send_note(note, vel, l.channel, dur)
+
+        # Guide track — quiet reference notes for the current recording layer
+        if self.loop_count == 0:
+            # First pass: play guide at low velocity so player hears what to play
+            for t, note, vel, dur in layer.notes:
+                if old_playhead <= t < self.playhead:
+                    ref_vel = min(vel, 40)
+                    self._send_note(note, ref_vel, layer.channel, dur)
 
         # Loop wrap
-        if self.playhead >= layer.loop_duration:
-            self.playhead -= layer.loop_duration
+        if self.playhead >= loop_dur:
+            self.playhead -= loop_dur
             self.loop_count += 1
-            if self.loop_count >= 2:
-                # Auto-stop after 2 loops (1 listen + 1 play)
-                self._send_transport(CC_RECORD)
-                self.state = "REVIEW"
+            print(f"  Loop {self.loop_count} complete ({len(layer.recorded)} notes recorded)")
+            # No auto-stop — keep looping until player presses ESC or ENTER
 
     def _draw(self):
         self.screen.fill(BG)
@@ -550,7 +585,16 @@ class Looper:
         self.screen.blit(counter, (WIDTH // 2 - counter.get_width()//2, HEIGHT - 50))
 
         # Footer
-        footer = self.font.render("[1-8] Drum hits   [ESC] Stop recording", True, TEXT_DIM)
+        # Looping layers indicator
+        looping = [l for l in self.layers if l.state == "looping"]
+        if looping:
+            loop_text = "LOOPING: " + " | ".join(f"{l.name} ({len(l.recorded)})" for l in looping)
+            loop_surf = self.font.render(loop_text, True, GREEN)
+            self.screen.blit(loop_surf, (20, HEIGHT - 52))
+
+        footer = self.font.render(
+            "[1-8] Play   [ENTER] Accept & next layer   [R] Redo   [TAB] Skip   [ESC] Stop",
+            True, TEXT_DIM)
         self.screen.blit(footer, (20, HEIGHT - 20))
 
     def _draw_drum_grid(self, layer, x, y, w, h, frac, total_beats, beat_dur, loop_dur):
